@@ -3,7 +3,7 @@
 ## References
 
 1. [Helm Chart — eDRF XClient Container Security](https://github.trellix.com/unified-agent/XClientInstaller/tree/a6549dd1dfff3dd4afefec2957445b3aee1cd970/container-security/helm#chart-structure) — Sailesh
-2. Container Security — eDRF Deployment Guide — Vikas M
+2. [Container Security — eDRF Deployment Guide](https://github.trellix.com/unified-agent/XClientInstaller/blob/624a8911399b436f777ba5ce8ca0d29f968feee6/container-security/README.md#deployment-steps) — Vikas M
 
 ## What is Helm?
 
