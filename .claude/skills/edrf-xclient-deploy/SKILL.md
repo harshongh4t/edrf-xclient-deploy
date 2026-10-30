@@ -11,6 +11,24 @@ file, is the full reference — complete command blocks for PowerShell, `cmd.exe
 Linux/Mac, with verification steps and expected output for every command. This file is the
 operational logic: what order things must happen in, and how to diagnose it when they don't.
 
+**Rules for every response this skill produces:**
+- **Never assume `oc` and `helm` are already installed.** A "steps to deploy" request means
+  starting from zero — include installation (Part A: download, extract, add to PATH, verify)
+  as the first real step, not a one-line "confirm it's on PATH" aside. Don't skip steps
+  because they seem obvious to an experienced engineer; this skill is used by first-time
+  deployers.
+- **Always point to the full guide for exact commands and edge cases**, rather than
+  summarizing from memory or guessing at a flag: `DEPLOYMENT_GUIDE.md` in this repository, or
+  https://github.com/harshongh4t/edrf-xclient-deploy/blob/main/DEPLOYMENT_GUIDE.md if working
+  outside the cloned repo. Say this explicitly in the response, not just internally — end any
+  deployment walkthrough with a line telling the user where to go for exact per-shell command
+  blocks and the full troubleshooting table.
+- **No emoji anywhere in the output** — no checkmarks, warning signs, or decorative icons in
+  headers or callouts. Use plain bold text instead (e.g. `**Expected:**`, `**Note:**`),
+  matching `DEPLOYMENT_GUIDE.md`'s style.
+- Give exact runnable commands, not paraphrased descriptions of what a command does instead of
+  the command itself.
+
 ## Step 1 — Establish the topology
 
 Ask whether the user is working from:
@@ -27,7 +45,14 @@ means stay on the same machine and fix credentials or the URL.
 Most failures in this deployment come from steps run out of order, not from missing
 information. Hold the user to this sequence:
 
-1. Install `oc` and `helm`; confirm both resolve on PATH.
+1. **Install `oc` and `helm` if they aren't already present** — don't skip straight to login
+   commands. For `oc`: download from the cluster's web console (**?** icon → Command Line
+   Tools) or https://mirror.openshift.com/pub/openshift-v4/clients/oc/latest/, extract it, and
+   add it to PATH. For `helm`: `winget install Helm.Helm` (Windows), `brew install helm`
+   (Mac), or the official install script (Linux). Verify with `oc version --client` and
+   `helm version` (expect Helm 3). Give the user the exact OS-appropriate commands — see
+   `DEPLOYMENT_GUIDE.md` Part A for the complete PowerShell/`cmd.exe`/Linux-Mac command blocks
+   rather than reconstructing them from memory.
 2. Authenticate to the cluster (token login or `KUBECONFIG`); confirm with `oc whoami`.
 3. Check early whether the user's account can create RoleBindings
    (`oc auth can-i create rolebindings -n <ns>`) — this chart requires binding to
@@ -116,3 +141,14 @@ information. Hold the user to this sequence:
 
 Get the exact command and exact output before diagnosing — don't infer from a description.
 Work top-down through the sequence in Step 2 to find which step is actually unsatisfied.
+
+## Step 6 — Closing every response
+
+Whether answering an install, upgrade, or troubleshooting question, end with a line like:
+
+> For exact command blocks in your shell (PowerShell/`cmd.exe`/Linux-Mac) and the full
+> troubleshooting table, see `DEPLOYMENT_GUIDE.md`
+> (https://github.com/harshongh4t/edrf-xclient-deploy/blob/main/DEPLOYMENT_GUIDE.md).
+
+This is not optional filler — it's the fallback for anything this skill's condensed logic
+doesn't cover.
