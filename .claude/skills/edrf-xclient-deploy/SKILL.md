@@ -22,31 +22,39 @@ Diagnostic: a `curl`/`curl.exe` request to `artifactory.trellix.com` that **hang
 a network/firewall split, not an auth problem. An **instant error code** (`401`/`403`/`404`)
 means stay on the same machine and fix credentials or the URL.
 
-## Step 2 — Enforce the required sequence
+## Step 2 — Enforce the required sequence (install)
 
 Most failures in this deployment come from steps run out of order, not from missing
 information. Hold the user to this sequence:
 
 1. Install `oc` and `helm`; confirm both resolve on PATH.
 2. Authenticate to the cluster (token login or `KUBECONFIG`); confirm with `oc whoami`.
-3. **Create the namespace before creating any secret inside it.** `oc create secret` fails
+3. Check early whether the user's account can create RoleBindings
+   (`oc auth can-i create rolebindings -n <ns>`) — this chart requires binding to
+   `system:openshift:scc:privileged`, which is usually admin-only. A `no` here means looping
+   in a cluster-admin before going further, not a problem to solve later.
+4. **Create the namespace before creating any secret inside it.** `oc create secret` fails
    with `namespace not found` otherwise — and after fixing the namespace, it's easy to forget
    to re-run the secret command.
-4. Generate the Artifactory identity token and create the pull secret with
+5. Generate the Artifactory identity token and create the pull secret with
    `oc create secret docker-registry`. Verify it exists
    (`oc get secret artifactory-pull-secret -n <ns>`) before moving on — never assume a
    command succeeded without checking.
-5. Resolve the image digest and populate `values.yaml`: `image.repository`, `image.digest`,
+6. Resolve the image digest and populate `values.yaml`: `image.repository`, `image.digest`,
    `imagePullSecret` (the secret's name, not its contents), `epo.ip`/`epo.user`/`epo.password`
-   (or `epo.existingSecret`), and `deploymentDetails.clusterName`.
-6. `helm upgrade --install ... --dry-run=client` first; resolve every `required` error before
+   (or `epo.existingSecret`), and `deploymentDetails.clusterName`. For the cluster name,
+   OpenShift node names follow `<cluster-name>-<random-infra-id>-<role>-<index>` —
+   `oc get infrastructure cluster -o jsonpath='{.status.infrastructureName}'` confirms it, and
+   the segment before the random suffix is usually the value to use (confirm against ePO's
+   existing naming convention if other clusters already report in).
+7. `helm upgrade --install ... --dry-run=client` first; resolve every `required` error before
    a real install.
-7. Real install (same command, `--dry-run=client` removed).
-8. Link the pull secret to the service account:
+8. Real install (same command, `--dry-run=client` removed).
+9. Link the pull secret to the service account:
    `oc secrets link edrf-admin artifactory-pull-secret --for=pull -n <ns>`. This only
    succeeds after the install has created `edrf-admin`.
-9. Verify pods, then check pod logs for actual ePO connectivity — `Running` only confirms the
-   container started.
+10. Verify pods, then check pod logs for actual ePO connectivity — `Running` only confirms the
+    container started.
 
 ## Step 3 — Recognize these specific failure modes
 
@@ -76,11 +84,35 @@ information. Hold the user to this sequence:
 - **`helm` path errors** (`cannot find Chart.yaml`, `expected a gzipped archive`) → the chart
   argument must be the folder (`./edrf-xclient`), never `Chart.yaml` itself. Check the current
   directory (`pwd` / `Get-Location` / `cd` with no args) before assuming the path is wrong.
+- **Pod stuck `Pending`** (not `ImagePullBackOff`) → the ServiceAccount likely never got the
+  privileged SCC RoleBinding, usually because the install ran without sufficient permissions.
+  Confirm with `oc get rolebinding -n <ns>`; if it's missing, this is Step 2.3's permission
+  check coming back to bite — get an admin to grant access and re-run the install.
+- **`CrashLoopBackOff` with ePO connection errors in the logs** → treat the same as "Running
+  but not reporting": wrong ePO IP/user/password, or the cluster/node can't reach the ePO
+  server at all. Escalate network reachability to the platform/network team if credentials
+  check out.
 - **Shell-specific syntax**: the backtick `` ` `` line-continuation only works in PowerShell
   (use `^` in `cmd.exe`, `\` in bash). PowerShell's `curl` is aliased to `Invoke-WebRequest` —
   use `curl.exe` for real curl syntax.
 
-## Step 4 — When troubleshooting
+## Step 4 — Upgrade, rollback, and uninstall
+
+- **Upgrade to a new build:** only the image digest needs refreshing — repeat the digest
+  lookup from Step 2.6, then
+  `helm upgrade edrf-xclient ./edrf-xclient -n <ns> --reuse-values --set image.digest="sha256:<new-digest>"`.
+  `--reuse-values` keeps every other setting (ePO config, pull secret, cluster name) as-is;
+  don't ask the user to re-supply values that haven't changed.
+- **Roll back a bad upgrade:** `helm history edrf-xclient -n <ns>` to find the last known-good
+  revision, then `helm rollback edrf-xclient <revision-number> -n <ns>`.
+- **Uninstall:** `helm uninstall edrf-xclient -n <ns>` removes only what Helm created
+  (DaemonSet, ServiceAccount, RoleBinding, ConfigMap, Secret). It does **not** remove the
+  namespace or anything created manually outside Helm — the Artifactory pull secret and any
+  `epo.existingSecret`. If the user wants a full teardown, delete those explicitly
+  (`oc delete secret artifactory-pull-secret -n <ns>`, `oc delete namespace <ns>`, etc.) —
+  don't assume `helm uninstall` alone leaves nothing behind.
+
+## Step 5 — When troubleshooting
 
 Get the exact command and exact output before diagnosing — don't infer from a description.
 Work top-down through the sequence in Step 2 to find which step is actually unsatisfied.
