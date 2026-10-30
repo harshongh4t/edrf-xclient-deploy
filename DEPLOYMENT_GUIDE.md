@@ -138,7 +138,8 @@ C:\oc\oc.exe version --client
 ```bash
 ~/bin/oc version --client
 ```
-✅ Expected: `Client Version: 4.x.x`.
+
+**Expected:** `Client Version: 4.x.x`.
 
 **Add it to PATH:**
 
@@ -176,7 +177,8 @@ oc version --client
 which oc
 oc version --client
 ```
-✅ Expected: the path command prints the binary's location, and `oc version --client` runs
+
+**Expected:** the path command prints the binary's location, and `oc version --client` runs
 without a full path.
 
 *(Alternative on Windows with Chocolatey: `choco install openshift-cli`.)*
@@ -210,7 +212,8 @@ chmod +x get_helm.sh
 ```
 helm version
 ```
-✅ Expected: `version.BuildInfo{Version:"v3...`. This chart requires Helm 3.
+
+**Expected:** `version.BuildInfo{Version:"v3...`. This chart requires Helm 3.
 
 ### A3. Nothing else to install
 
@@ -293,7 +296,8 @@ individual logins.
 ```
 oc whoami
 ```
-✅ Expected: your identity for token login, or the account baked into the kubeconfig (e.g.
+
+**Expected:** your identity for token login, or the account baked into the kubeconfig (e.g.
 `system:admin`).
 
 Confirm the cluster itself is reachable:
@@ -301,7 +305,8 @@ Confirm the cluster itself is reachable:
 oc cluster-info
 oc get nodes
 ```
-✅ Expected: all nodes show `STATUS = Ready`. A hang or error here is a network/VPN/DNS issue
+
+**Expected:** all nodes show `STATUS = Ready`. A hang or error here is a network/VPN/DNS issue
 reaching the API server, not a login problem.
 
 **If `oc whoami` fails:**
@@ -355,12 +360,12 @@ location.
 
 | Field shown on screen | Example shape | Use it? |
 |---|---|---|
-| **Reference token** | long string, e.g. `cmVmdGtuOjAxOjE4MjQ4...` | ✅ This is the credential. Use it as `<artifactory_api_key>` throughout this guide (`--docker-password` in Part E, `curl -u` in Part C). |
+| **Reference token** | long string, e.g. `cmVmdGtuOjAxOjE4MjQ4...` | Yes — this is the credential. Use it as `<artifactory_api_key>` throughout this guide (`--docker-password` in Part E, `curl -u` in Part C). |
 | Username | your email | This is `<artifactory_user>` |
 | Scope | e.g. `applied-permissions/user` | Informational only |
 | Audience | e.g. `*@*` | Informational only |
 | Expires In | e.g. `11 month(s) 30 day(s)` | Informational — tells you when to regenerate |
-| **Token ID** | short UUID, e.g. `6a66d39a-7450-489b-...` | ❌ Not a credential — an internal label for locating/revoking the token. Using it as a password fails with `401 Unauthorized`. |
+| **Token ID** | short UUID, e.g. `6a66d39a-7450-489b-...` | No — not a credential. An internal label for locating/revoking the token. Using it as a password fails with `401 Unauthorized`. |
 
 The Reference Token and Token ID look similarly random at a glance — if a pull or lookup
 fails with `401`, confirm you used the Reference Token, not the Token ID.
@@ -430,7 +435,8 @@ cd ~/edrf-deploy          # Linux/Mac
 ```
 helm lint ./edrf-xclient
 ```
-✅ Expected: `level=WARN msg="missing required values"` lines are normal at this stage (values
+
+**Expected:** `level=WARN msg="missing required values"` lines are normal at this stage (values
 haven't been supplied yet). The line that matters is:
 ```
 1 chart(s) linted, 0 chart(s) failed
@@ -583,7 +589,8 @@ oc project edrf-tests
 ```
 oc project
 ```
-✅ Expected: `Using project "edrf-tests" on server ...`.
+
+**Expected:** `Using project "edrf-tests" on server ...`.
 
 ---
 
@@ -604,7 +611,8 @@ regenerate a token without those characters.
 ```
 oc get secret artifactory-pull-secret -n edrf-tests
 ```
-✅ Expected: one row, `TYPE kubernetes.io/dockerconfigjson`.
+
+**Expected:** one row, `TYPE kubernetes.io/dockerconfigjson`.
 
 Note the secret name — `artifactory-pull-secret` — it's used as `imagePullSecret` in Part G.
 
@@ -694,7 +702,7 @@ helm template edrf-xclient ./edrf-xclient --set image.repository="artifactory.tr
 helm upgrade --install edrf-xclient ./edrf-xclient -n edrf-tests --set image.repository="artifactory.trellix.com/<docker-repo-name>/trellix-edrf" --set image.digest="sha256:<digest-from-part-c>" --set imagePullSecret="artifactory-pull-secret" --set epo.ip="<epo_ip>" --set epo.user="<epo_user>" --set epo.existingSecret="epo-existing-secret" --set deploymentDetails.clusterName="<your-cluster-name>"
 ```
 
-✅ Expected: ends with `STATUS: deployed`.
+**Expected:** ends with `STATUS: deployed`.
 
 This creates, in order: an `edrf-admin` ServiceAccount with the privileged-SCC RoleBinding,
 an `epo-details` ConfigMap (and Secret, if not using an existing one), and a DaemonSet
@@ -743,7 +751,7 @@ helm list -n edrf-tests
 helm list --all-namespaces
 ```
 
-✅ Expected: one `Running` pod per Linux worker node, `helm status` showing
+**Expected:** one `Running` pod per Linux worker node, `helm status` showing
 `STATUS: deployed`, and pod logs showing a successful ePO connection — a `Running` status
 alone only confirms the container started, not that the agent is reporting.
 
