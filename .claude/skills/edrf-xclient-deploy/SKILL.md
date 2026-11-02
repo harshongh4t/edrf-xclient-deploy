@@ -53,7 +53,22 @@ information. Hold the user to this sequence:
    `helm version` (expect Helm 3). Give the user the exact OS-appropriate commands — see
    `DEPLOYMENT_GUIDE.md` Part A for the complete PowerShell/`cmd.exe`/Linux-Mac command blocks
    rather than reconstructing them from memory.
-2. Authenticate to the cluster (token login or `KUBECONFIG`); confirm with `oc whoami`.
+2. **Authenticate to the cluster — give both options explicitly, don't collapse to just one.**
+   Ask which applies, or present both:
+   - **Token login** (most common): from the OpenShift web console, click the username
+     (top-right) → **Copy login command** → **Display Token**, then run the copied command:
+     `oc login --token=sha256~xxxxxxxxxxxx --server=https://api.<your-cluster>:6443`
+     (identical in all three shells). These tokens are short-lived — a later auth error from
+     `oc whoami` means repeating this, not debugging the cluster.
+   - **Kubeconfig file** (common for shared/service-account access): point `oc` at the file via
+     the `KUBECONFIG` environment variable, which is shell-specific and session-scoped unless
+     made permanent:
+     - PowerShell: `$env:KUBECONFIG = "C:\path\to\kubeconfig"`
+     - cmd.exe: `set KUBECONFIG=C:\path\to\kubeconfig`
+     - Linux/Mac: `export KUBECONFIG=/path/to/kubeconfig`
+   - Either way, confirm with `oc whoami` and `oc get nodes` (expect all nodes `Ready`). See
+     `DEPLOYMENT_GUIDE.md` Part B1 for the permanent-variable commands per shell and the
+     troubleshooting steps if `oc whoami` fails.
 3. Check early whether the user's account can create RoleBindings
    (`oc auth can-i create rolebindings -n <ns>`) — this chart requires binding to
    `system:openshift:scc:privileged`, which is usually admin-only. A `no` here means looping
