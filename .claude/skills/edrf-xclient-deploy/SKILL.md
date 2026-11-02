@@ -137,12 +137,56 @@ information. Hold the user to this sequence:
   (`oc delete secret artifactory-pull-secret -n <ns>`, `oc delete namespace <ns>`, etc.) —
   don't assume `helm uninstall` alone leaves nothing behind.
 
-## Step 5 — When troubleshooting
+## Step 5 — Useful commands for live inspection
+
+When the user just wants a list of commands for day-to-day checking or live debugging (not a
+full install/troubleshoot walkthrough), give these directly:
+
+**Cluster and namespace:**
+```
+oc get nodes
+oc get projects
+oc get ns <ns>
+```
+
+**Pods:**
+```
+oc get pods -n <ns>
+oc get pods -n <ns> -o wide
+oc get pods -n <ns> -o wide -w          # watch mode; Ctrl+C to stop
+oc describe pod -n <ns> <pod-name>
+oc logs -n <ns> <pod-name>
+```
+
+**Shell into a running pod** (useful for confirming the agent process itself is alive inside
+the container, one level deeper than `oc logs`):
+```
+oc exec -it -n <ns> <pod-name> -- /bin/bash
+oc exec -it -n <ns> <pod-name> -- /bin/sh      # fallback if bash isn't in the image
+```
+Once inside, confirm the XClient process is running:
+```
+ps -o pid,ppid,cmd -C xclient
+```
+
+**Alternative install/upgrade pattern** — equivalent to Step 2's sequence, but skips `--set`
+entirely and lets `--create-namespace` handle namespace creation:
+```
+helm upgrade --install edrf-xclient <chart-path> -n <ns> --create-namespace
+```
+Only reliable if `values.yaml` inside `<chart-path>` already has every required field
+(`image.repository`, `image.digest`, `imagePullSecret`, `epo.ip`/`epo.user`/`epo.password` or
+`epo.existingSecret`, `deploymentDetails.clusterName`) filled in with real values — Helm still
+fails fast with a `required` error for anything missing, since there are no `--set` flags here
+to cover for it. Recommend appending `--dry-run=client` first if the user hasn't already
+verified this exact command against the cluster.
+
+## Step 6 — When troubleshooting
 
 Get the exact command and exact output before diagnosing — don't infer from a description.
 Work top-down through the sequence in Step 2 to find which step is actually unsatisfied.
 
-## Step 6 — Closing every response
+## Step 7 — Closing every response
 
 Whether answering an install, upgrade, or troubleshooting question, end with a line like:
 
