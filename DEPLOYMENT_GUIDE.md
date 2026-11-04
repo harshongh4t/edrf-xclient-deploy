@@ -101,6 +101,132 @@ machine)**, **(registry mode)**, or **(airgap mode)**.
 
 ---
 
+## Quick start — Full command sequence (Windows or Linux jumpbox)
+
+This is the complete install/upgrade sequence on one page, for when the tools are installed
+and you're logged in. It is the same sequence used to upgrade to build 50.99.0.144 in
+registry mode. If anything here is unfamiliar or fails, follow the detailed parts below
+(Parts A–H).
+
+Replace every `<...>` placeholder with your own values (Parts B3, B4, C).
+
+| | Windows jumpbox | Linux jumpbox |
+|---|---|---|
+| Extra tool needed | **Git for Windows** (Part A3), because `deploy.sh` is a bash script | None, because bash is built in |
+| Shell used below | `cmd.exe` | bash |
+
+### Step 1 — Pre-checks
+
+The same commands on both:
+```
+oc whoami
+oc get secret artifactory-pull-secret -n <namespace>
+oc auth can-i create securitycontextconstraints
+oc auth can-i create clusterroles
+oc auth can-i create rolebindings -n <namespace>
+```
+**Expected:** your identity, one secret row of type `kubernetes.io/dockerconfigjson`, and `yes`
+three times. If the secret doesn't exist, create it first (Parts D and E).
+
+### Step 2 — Create a folder and extract the bundle
+
+**Windows (`cmd.exe`):**
+```cmd
+mkdir C:\edrf-deploy\bundle
+move C:\path\to\edrf-xclient-bundle-<version>.tar.gz C:\edrf-deploy\bundle\
+cd /d C:\edrf-deploy\bundle
+tar -xzf edrf-xclient-bundle-<version>.tar.gz
+dir
+```
+**Linux:**
+```bash
+mkdir -p ~/edrf-deploy/bundle
+mv /path/to/edrf-xclient-bundle-<version>.tar.gz ~/edrf-deploy/bundle/
+cd ~/edrf-deploy/bundle
+tar -xzf edrf-xclient-bundle-<version>.tar.gz
+ls -la
+```
+**Expected:** `image.tar`, `edrf-xclient/`, `deploy.sh`.
+
+### Step 3 — Update `values.yaml` and dry-run
+
+Fill in `edrf-xclient/values.yaml` (ePO IP, user, password, image repository and digest, pull
+secret name, cluster name; see Appendix A) using any text editor. On Windows that can be
+`notepad edrf-xclient\values.yaml`. On Linux, use `vi edrf-xclient/values.yaml` or `nano`.
+Don't commit this file anywhere, because it contains the ePO password.
+
+Then dry-run, using the same command on both:
+```
+helm upgrade --install edrf-xclient ./edrf-xclient -n <namespace> --dry-run=client
+```
+**Expected:** rendered manifests, `STATUS: pending-upgrade`, `DESCRIPTION: Dry run complete`,
+and no `required` errors. Nothing changes on the cluster.
+
+### Step 4 — Install or upgrade with `deploy.sh`
+
+**Windows (`cmd.exe`, one line):**
+```cmd
+"C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace <namespace> --epo-ip <epo_ip> --epo-user <epo_user> --epo-password "<epo_password>" --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret
+```
+**Linux:**
+```bash
+chmod +x deploy.sh
+./deploy.sh \
+  --namespace <namespace> \
+  --epo-ip <epo_ip> \
+  --epo-user <epo_user> \
+  --epo-password '<epo_password>' \
+  --cluster-name <cluster_name> \
+  --image-repo <image_repo> \
+  --image-digest sha256:<digest> \
+  --image-pull-secret artifactory-pull-secret
+```
+
+- **Windows:** don't type `./deploy.sh` on its own in `cmd.exe`. Keep the command on one
+  line, and use double quotes around the password.
+- **Linux:** `chmod +x` is needed because the extracted script may not be executable
+  (otherwise you get `Permission denied`). `bash deploy.sh ...` also works. Use single quotes
+  around the password.
+
+**Expected:**
+```
+==> Mode: registry (image: <image_repo>@sha256:<digest>)
+==> Installing Helm chart
+Release "edrf-xclient" has been upgraded. Happy Helming!
+STATUS: deployed
+REVISION: <n>
+DESCRIPTION: Upgrade complete
+==> Deployment complete. Check pod status:
+```
+
+### Step 5 — Verify
+
+The same commands on both:
+```
+helm list -n <namespace>
+oc rollout status ds/edrf-xclient-container-security -n <namespace>
+oc get pods -n <namespace> -o wide -w
+```
+**Expected:** release `deployed` with a new revision, rollout `successfully rolled out`, and
+one `1/1 Running` pod per Linux worker node with `RESTARTS 0`. An upgrade rollout can take
+20–25 minutes (Part H1). Press Ctrl+C to stop `-w`.
+
+### Windows vs. Linux at a glance
+
+| Step | Windows (`cmd.exe`) | Linux |
+|---|---|---|
+| Tool prerequisite | Install Git for Windows | Nothing extra |
+| Create folder | `mkdir C:\edrf-deploy\bundle` | `mkdir -p ~/edrf-deploy/bundle` |
+| Move bundle | `move <src> C:\edrf-deploy\bundle\` | `mv <src> ~/edrf-deploy/bundle/` |
+| Change folder | `cd /d C:\edrf-deploy\bundle` | `cd ~/edrf-deploy/bundle` |
+| List files | `dir` | `ls -la` |
+| Edit values | `notepad edrf-xclient\values.yaml` | `vi edrf-xclient/values.yaml` |
+| Run script | `"C:\Program Files\Git\bin\bash.exe" ./deploy.sh ...` (one line) | `chmod +x deploy.sh` then `./deploy.sh ...` |
+| Password quoting | `"<epo_password>"` | `'<epo_password>'` |
+| `oc` / `helm` / `tar` commands | Same | Same |
+
+---
+
 ## Part A (jumpbox) — Install the tools
 
 | Tool | Needed for | Windows | Linux/Mac |

@@ -35,6 +35,10 @@ operating logic: the required order, the exact commands, and how to diagnose fai
   labels such as `**Expected:**` and `**Note:**`.
 - **Never put real passwords or tokens in files meant for git.** Remind users not to commit a
   `values.yaml` containing the ePO password.
+- **Answer for both Windows and Linux jumpboxes.** Unless the user has said which one they use,
+  give the full command sequence for both a Windows jumpbox (`cmd.exe` + Git Bash) and a Linux
+  jumpbox, as in Step 2.12. Shared `oc`/`helm` commands can be shown once and labeled
+  "same on both".
 - **Always end with the pointer to `DEPLOYMENT_GUIDE.md`** (Step 7).
 
 ## Step 1 — Establish machine and mode
@@ -196,6 +200,85 @@ starting with no repeating errors, and the nodes visible in the ePO console. Tel
   10 minutes.
 - Recheck `RESTARTS` after about an hour. A climbing count means the agent is crashing, even
   if the pod looks `Running`.
+
+**2.12 Quick command sequence: Windows vs. Linux jumpbox.** When the user asks for "the
+commands", "quick steps", or how to do it from Windows or Linux, give this sequence (after
+confirming tools are installed and they're logged in). This is the sequence used for the
+50.99.0.144 upgrade.
+
+Pre-checks (same on both):
+```
+oc whoami
+oc get secret artifactory-pull-secret -n <namespace>
+oc auth can-i create securitycontextconstraints
+oc auth can-i create clusterroles
+oc auth can-i create rolebindings -n <namespace>
+```
+
+Extract the bundle, **Windows (`cmd.exe`):**
+```
+mkdir C:\edrf-deploy\bundle
+move C:\path\to\edrf-xclient-bundle-<version>.tar.gz C:\edrf-deploy\bundle\
+cd /d C:\edrf-deploy\bundle
+tar -xzf edrf-xclient-bundle-<version>.tar.gz
+dir
+```
+Extract the bundle, **Linux:**
+```
+mkdir -p ~/edrf-deploy/bundle
+mv /path/to/edrf-xclient-bundle-<version>.tar.gz ~/edrf-deploy/bundle/
+cd ~/edrf-deploy/bundle
+tar -xzf edrf-xclient-bundle-<version>.tar.gz
+ls -la
+```
+
+Update `edrf-xclient/values.yaml` (Windows: `notepad edrf-xclient\values.yaml`; Linux:
+`vi edrf-xclient/values.yaml` or `nano`), then dry-run (same on both):
+```
+helm upgrade --install edrf-xclient ./edrf-xclient -n <namespace> --dry-run=client
+```
+
+Install or upgrade, **Windows (`cmd.exe`, one line, needs Git for Windows):**
+```
+"C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace <namespace> --epo-ip <epo_ip> --epo-user <epo_user> --epo-password "<epo_password>" --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret
+```
+Install or upgrade, **Linux:**
+```
+chmod +x deploy.sh
+./deploy.sh \
+  --namespace <namespace> \
+  --epo-ip <epo_ip> \
+  --epo-user <epo_user> \
+  --epo-password '<epo_password>' \
+  --cluster-name <cluster_name> \
+  --image-repo <image_repo> \
+  --image-digest sha256:<digest> \
+  --image-pull-secret artifactory-pull-secret
+```
+(On Linux, `chmod +x` avoids `Permission denied`, or use `bash deploy.sh ...`.)
+
+Verify (same on both):
+```
+helm list -n <namespace>
+oc rollout status ds/edrf-xclient-container-security -n <namespace>
+oc get pods -n <namespace> -o wide -w
+```
+
+Differences at a glance:
+
+| Step | Windows (`cmd.exe`) | Linux |
+|---|---|---|
+| Tool prerequisite | Git for Windows | Nothing extra |
+| Create folder | `mkdir C:\edrf-deploy\bundle` | `mkdir -p ~/edrf-deploy/bundle` |
+| Move bundle | `move` | `mv` |
+| Change folder | `cd /d C:\edrf-deploy\bundle` | `cd ~/edrf-deploy/bundle` |
+| List files | `dir` | `ls -la` |
+| Run script | `"C:\Program Files\Git\bin\bash.exe" ./deploy.sh ...` (one line) | `chmod +x deploy.sh` then `./deploy.sh ...` |
+| Password quoting | `"..."` | `'...'` |
+| `oc` / `helm` / `tar` | Same | Same |
+
+Never put the user's real ePO IP, password, cluster name, or digest into repo files. Use
+placeholders.
 
 ## Step 3 — Recognize these failure modes
 
