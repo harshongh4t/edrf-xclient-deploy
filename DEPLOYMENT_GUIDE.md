@@ -70,7 +70,9 @@ which deployment mode to use.
 
 This is the complete install/upgrade sequence on one page, for when the tools are installed
 and you're logged in. It's the sequence used to deploy build 50.99.0.150 in registry mode. If
-anything here is unfamiliar or fails, follow the detailed parts below (Parts A–I).
+anything here is unfamiliar or fails, follow the detailed parts below (Parts A–I). For a
+Linux jumpbox, **Appendix E** has the same sequence as a single copy-paste block with
+variables set once at the top.
 
 Replace every `<...>` placeholder with your own values. **Never run a command with a `<...>`
 placeholder still in it.** For example, a literal `sha256:<digest>` makes every pod fail with
@@ -122,8 +124,11 @@ from the folder that contains `deploy.sh`.
 
 ### Step 3 — Create the `epo-coninfo` secret
 
-Download the **Linux** SmartInstaller (`TrellixSmartInstall.sh`) from the ePO console (Part
-B4) and save it into the bundle folder. Then:
+Create and download the **Linux** SmartInstaller (`TrellixSmartInstall.sh`) from the ePO
+on-prem console: **Menu → Systems → System Tree → New Systems → Create URL for client-side
+agent download**, pick the **Non-Windows (Linux)** agent version and **All Agent Handlers**,
+click **OK**, then open the generated URL and download the file (full steps in Part B4). Save
+it into the bundle folder. Then:
 
 **Windows (`cmd.exe`, one line):**
 ```cmd
@@ -578,13 +583,21 @@ doesn't accept SSO passwords for CLI or API pulls.
 ### B4 (any machine with a browser). ePO SmartInstaller and cluster name
 
 **SmartInstaller.** The agent gets its ePO connection details from `coninfo.xml`, which is
-packed inside the ePO **Linux SmartInstaller**. To download it:
+packed inside the ePO **Linux SmartInstaller**. You create it in the ePO on-prem console by
+generating an agent deployment URL, then download it from that URL:
 
-1. Log in to the **ePO console** that these cluster nodes should report to.
-2. Go to **Agent → Download Agent**. The exact menu wording can vary between ePO versions.
-   Look for the agent deployment or SmartInstaller download page.
-3. Choose the **Linux** SmartInstaller. The file is `TrellixSmartInstall.sh` (several MB).
-4. Save it, then copy it into the bundle folder on the jumpbox (Part B5).
+1. Log in to the **ePO on-prem console** that these cluster nodes should report to.
+2. Select **Menu → Systems → System Tree**, then select **New Systems**.
+3. Select **Create URL for client-side agent download**.
+4. Enter a custom **URL name** (any name that identifies this deployment, for example
+   `edrf-xclient-<cluster_name>`).
+5. From the list, select the **Agent version** for **Non-Windows (Linux)** operating systems.
+   Don't pick a Windows agent; `extract-coninfo.sh` only works with the Linux SmartInstaller.
+6. Under Agent Handlers, select **All Agent Handlers**.
+7. Click **OK**. ePO shows the **Agent Deployment URL**. You can use this URL to download the
+   SmartInstaller yourself or send it to whoever will run the deployment.
+8. Open the URL in a browser and download the file **`TrellixSmartInstall.sh`** (several MB).
+9. Copy it into the bundle folder on the jumpbox (Part B5).
 
 > **Don't open or edit `TrellixSmartInstall.sh` in a text editor.** It's a shell script with a
 > binary payload appended, and saving it from an editor can corrupt it. Copy it only as a
@@ -1493,3 +1506,183 @@ with the dev team whether it has been updated for the `coninfo.xml` method.
 > kubectl delete pod -l name=edrf-xclient-container-security
 > ```
 > The mount is lost on `minikube stop` or `delete`, so re-run it after each restart.
+
+---
+
+## Appendix E — Linux jumpbox copy-paste command sequence (registry mode)
+
+The complete Linux sequence as one block, in the form used for the build 50.99.0.150
+deployment. Save it as a `.txt` file, replace the placeholders, and paste it block by block
+into a single terminal.
+
+**Before you start:**
+- `oc` and `helm` (v3) installed, and you're logged in (Parts A and B1).
+- The namespace and the `artifactory-pull-secret` already exist (Parts D and F).
+- You have the Linux SmartInstaller from ePO (Part B4) and the image digest for your build
+  (Part C).
+- Replace **every** `<...>` placeholder. A leftover `sha256:<digest>` makes every pod fail
+  with `InvalidImageName`.
+- Never commit your filled-in copy, `TrellixSmartInstall.sh`, or `epo-coninfo.yml` to git.
+
+```text
+------------------------------------------------------------------------------------
+STEP 0 - Set variables (edit every value before running)
+------------------------------------------------------------------------------------
+
+NS=<namespace>
+CLUSTER=<cluster_name>
+REPO=artifactory.trellix.com/edrf-xclient-container-security/trellix-edrf
+PULL_SECRET=artifactory-pull-secret
+VERSION=<bundle_version>
+BUNDLE_DIR=~/edrf-deploy/bundle-$VERSION
+
+# Real digest for this build from Artifactory (Part C):
+# sha256: followed by 64 hex characters, no < or >
+DIGEST=sha256:<64_char_digest>
+
+
+------------------------------------------------------------------------------------
+STEP 1 - Pre-checks
+------------------------------------------------------------------------------------
+
+oc whoami
+oc get ns $NS
+oc get secret $PULL_SECRET -n $NS
+oc auth can-i create securitycontextconstraints
+oc auth can-i create rolebindings -n $NS
+oc auth can-i create secrets -n $NS
+
+# Expected: your username, namespace Active, the pull secret listed, "yes" three times.
+# ("not namespace scoped" warning on the SCC check is normal.)
+
+
+------------------------------------------------------------------------------------
+STEP 2 - Extract the bundle into a new folder
+------------------------------------------------------------------------------------
+
+mkdir -p $BUNDLE_DIR
+mv /path/to/edrf-xclient-bundle-$VERSION.tar.gz $BUNDLE_DIR/
+cd $BUNDLE_DIR
+tar -xzf edrf-xclient-bundle-$VERSION.tar.gz
+ls -la
+
+# Expected: image.tar, edrf-xclient/, deploy.sh, extract-coninfo.sh
+# If tar created a subfolder instead, go into it:
+#   cd edrf-xclient-bundle-$VERSION
+
+
+------------------------------------------------------------------------------------
+STEP 3 - Create the epo-coninfo secret
+------------------------------------------------------------------------------------
+
+# 3a. Download the LINUX SmartInstaller (TrellixSmartInstall.sh) from the ePO console
+#     (Menu -> Systems -> System Tree -> New Systems -> Create URL for client-side agent
+#     download -> Non-Windows (Linux) agent version -> All Agent Handlers -> OK, then open
+#     the URL and download the file; see Part B4) and copy it into this folder.
+#     Do not open it in an editor.
+ls -la TrellixSmartInstall.sh
+
+# 3b. Generate epo-coninfo.yml
+bash extract-coninfo.sh TrellixSmartInstall.sh $NS
+
+# Expected: [1/5] ... [5/5], then "Done." and "Output file : epo-coninfo.yml"
+
+# 3c. Create the secret on the cluster and verify
+oc apply -f epo-coninfo.yml
+oc get secret epo-coninfo -n $NS
+
+# Expected: secret/epo-coninfo created, then one row "epo-coninfo   Opaque   1"
+
+
+------------------------------------------------------------------------------------
+STEP 4 - Dry-run (changes nothing on the cluster)
+------------------------------------------------------------------------------------
+
+# Safety check: prints STOP if DIGEST still has the placeholder
+echo "$DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$' && echo "Digest OK" || echo "STOP: set DIGEST in Step 0"
+
+helm upgrade --install edrf-xclient ./edrf-xclient -n $NS \
+  --set image.repository="$REPO" \
+  --set image.digest="$DIGEST" \
+  --set imagePullSecret="$PULL_SECRET" \
+  --set deploymentDetails.clusterName="$CLUSTER" \
+  --dry-run=client
+
+# Expected: STATUS: pending-upgrade, DESCRIPTION: Dry run complete, no "required" errors.
+
+# Check only the image line (must end in your real 64-character digest):
+helm upgrade --install edrf-xclient ./edrf-xclient -n $NS \
+  --set image.repository="$REPO" \
+  --set image.digest="$DIGEST" \
+  --set imagePullSecret="$PULL_SECRET" \
+  --set deploymentDetails.clusterName="$CLUSTER" \
+  --dry-run=client | grep "image:"
+
+
+------------------------------------------------------------------------------------
+STEP 5 - Deploy
+------------------------------------------------------------------------------------
+
+chmod +x deploy.sh
+./deploy.sh \
+  --namespace $NS \
+  --cluster-name $CLUSTER \
+  --image-repo $REPO \
+  --image-digest $DIGEST \
+  --image-pull-secret $PULL_SECRET
+
+# Expected:
+#   ==> Mode: registry (image: ...@sha256:...)
+#   ==> Installing Helm chart
+#   STATUS: deployed
+#   ==> Deployment complete
+
+
+------------------------------------------------------------------------------------
+STEP 6 - Verify
+------------------------------------------------------------------------------------
+
+helm list -n $NS
+
+# Can take 20-25 minutes on an upgrade (old pods take up to 8 minutes each to stop)
+oc rollout status ds/edrf-xclient-container-security -n $NS
+
+oc get pods -n $NS -o wide
+
+# Expected: one pod per worker node, all 1/1 Running, RESTARTS 0
+
+# Pick the first agent pod
+POD=$(oc get pods -n $NS -l name=edrf-xclient-container-security -o jsonpath='{.items[0].metadata.name}')
+echo $POD
+
+oc exec -n $NS $POD -- ls -l /var/McAfee/agent/coninfo.xml
+oc logs -n $NS $POD
+
+# Expected: coninfo.xml present; logs show the agent provisioning against ePO
+# with no repeating errors. Then confirm the nodes in the ePO console.
+
+
+------------------------------------------------------------------------------------
+STEP 7 - Clean up local sensitive files
+------------------------------------------------------------------------------------
+
+rm -f epo-coninfo.yml
+
+
+------------------------------------------------------------------------------------
+USEFUL COMMANDS (any time)
+------------------------------------------------------------------------------------
+
+oc get pods -n $NS -o wide -w                     # watch pods live (Ctrl+C to stop)
+oc describe pod -n $NS $POD                       # events and last state
+oc logs -n $NS $POD --previous                    # logs before the last restart
+oc exec -it -n $NS $POD -- /bin/bash              # shell into the pod
+helm history edrf-xclient -n $NS                  # revision history
+helm rollback edrf-xclient <revision> -n $NS      # roll back to a revision
+
+# Copy a log file out of a pod (inside the pod, find it with: ls -lrth /tmp)
+oc cp -n $NS $POD:/tmp/<log-file> ./<log-file>
+```
+
+The variables only last for the current terminal. If you open a new terminal, re-run Step 0
+first.

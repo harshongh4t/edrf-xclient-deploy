@@ -161,11 +161,21 @@ oc new-project <namespace>
 It must exist before the two secrets. `deploy.sh`'s `--create-namespace` runs too late.
 
 **2.9 Create the `epo-coninfo` secret (mandatory, both modes):**
-1. In the **ePO console** these nodes should report to, go to **Agent → Download Agent**
-   (wording varies by ePO version) and download the **Linux** SmartInstaller,
-   `TrellixSmartInstall.sh` (several MB). Copy it into the bundle folder. **Tell the user not
-   to open or save it in a text editor**, because it has a binary payload that an editor can
-   corrupt. If they lack ePO access, their ePO admin can provide it.
+1. Create and download the **Linux** SmartInstaller, `TrellixSmartInstall.sh`, from the
+   **ePO on-prem console** these nodes should report to. Give the user these exact steps:
+   1. Select **Menu → Systems → System Tree**, then select **New Systems**.
+   2. Select **Create URL for client-side agent download**.
+   3. Enter a custom **URL name**.
+   4. Select the **Agent version** for **Non-Windows (Linux)** operating systems from the
+      list (not a Windows agent; `extract-coninfo.sh` only accepts the Linux SmartInstaller).
+   5. Select **All Agent Handlers**.
+   6. Click **OK**. ePO shows the **Agent Deployment URL**, which can be used to download the
+      SmartInstaller or sent to whoever runs the deployment.
+   7. Open that URL and download **`TrellixSmartInstall.sh`** (several MB).
+
+   Copy it into the bundle folder. **Tell the user not to open or save it in a text editor**,
+   because it has a binary payload that an editor can corrupt. If they lack ePO access,
+   their ePO admin can generate the URL for them. Full steps: DEPLOYMENT_GUIDE.md Part B4.
 2. Generate the manifest:
    - cmd.exe: `"C:\Program Files\Git\bin\bash.exe" extract-coninfo.sh TrellixSmartInstall.sh <namespace>`
    - PowerShell: `& "C:\Program Files\Git\bin\bash.exe" extract-coninfo.sh TrellixSmartInstall.sh <namespace>`
