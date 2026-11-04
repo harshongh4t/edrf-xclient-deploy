@@ -53,3 +53,68 @@ Claude Code.
 
 Either way, no further configuration is required — Claude Code discovers skills under
 `.claude/skills/` (project-level) or `~/.claude/skills/` (personal) on its own.
+
+---
+
+## Updating the skill
+
+The skill and `DEPLOYMENT_GUIDE.md` are updated whenever the deployment process changes (for
+example, the move to the bundle and `deploy.sh` flow). Claude Code doesn't update a skill on
+its own, so pull the latest version using the method that matches how you installed it.
+
+**Note:** this repository's commit history was rewritten once to remove sensitive values. If
+you cloned it **before** that, a normal `git pull` fails or reports diverged branches. Use the
+one-time reset in step 1 below instead.
+
+### If you used Option 1 (cloned repo)
+
+1. Go to your clone and get the latest version:
+   ```bash
+   cd edrf-xclient-deploy
+   git pull
+   ```
+   **If you cloned before the history rewrite**, run this once instead. It discards any local
+   changes in the clone:
+   ```bash
+   git fetch origin
+   git reset --hard origin/main
+   ```
+   Or delete the folder and clone again:
+   ```bash
+   git clone https://github.com/harshongh4t/edrf-xclient-deploy.git
+   ```
+2. Start a **new** Claude Code session in the folder. A session that was already open keeps
+   the old version of the skill.
+
+### If you used Option 2 (personal skill)
+
+1. Get the latest repository files (step 1 above, or download the repository as a ZIP from
+   GitHub and extract it).
+2. From the repository folder, copy the updated files over your existing copies:
+
+   **Windows (cmd.exe):**
+   ```
+   copy /Y DEPLOYMENT_GUIDE.md "%USERPROFILE%\.claude\skills\edrf-xclient-deploy\"
+   copy /Y .claude\skills\edrf-xclient-deploy\SKILL.md "%USERPROFILE%\.claude\skills\edrf-xclient-deploy\"
+   ```
+   **Windows (PowerShell):**
+   ```powershell
+   Copy-Item DEPLOYMENT_GUIDE.md "$env:USERPROFILE\.claude\skills\edrf-xclient-deploy\" -Force
+   Copy-Item .claude\skills\edrf-xclient-deploy\SKILL.md "$env:USERPROFILE\.claude\skills\edrf-xclient-deploy\" -Force
+   ```
+   **Linux/Mac:**
+   ```bash
+   cp DEPLOYMENT_GUIDE.md ~/.claude/skills/edrf-xclient-deploy/
+   cp .claude/skills/edrf-xclient-deploy/SKILL.md ~/.claude/skills/edrf-xclient-deploy/
+   ```
+3. Start a **new** Claude Code session.
+
+### Confirm you have the latest version
+
+Open `SKILL.md` (in your clone, or in your personal skills folder) and check that it mentions
+**`deploy.sh`** and **Git for Windows**. If it still describes a manual `helm install` with
+`--set` flags, you have the old version. Repeat the steps above.
+
+You can also ask Claude directly: invoke `/edrf-xclient-deploy` and ask how to deploy. The
+answer should start with installing the tools (including Git for Windows on Windows) and use
+`deploy.sh`, not a manual `helm install`.
