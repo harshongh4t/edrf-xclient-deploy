@@ -112,9 +112,11 @@ one-time reset in step 1 below instead.
 ### Confirm you have the latest version
 
 Open `SKILL.md` (in your clone, or in your personal skills folder) and check that it mentions
-**`deploy.sh`** and **Git for Windows**. If it still describes a manual `helm install` with
-`--set` flags, you have the old version. Repeat the steps above.
+**`extract-coninfo.sh`** and the **`epo-coninfo`** secret. If it doesn't, or if it still
+describes `--epo-ip` / `--epo-password` flags or a manual `helm install`, you have an old
+version. Repeat the steps above.
 
 You can also ask Claude directly: invoke `/edrf-xclient-deploy` and ask how to deploy. The
-answer should start with installing the tools (including Git for Windows on Windows) and use
-`deploy.sh`, not a manual `helm install`.
+answer should start with installing the tools (including Git for Windows on Windows), include
+creating the `epo-coninfo` secret from the ePO SmartInstaller, and use `deploy.sh` without any
+ePO flags.

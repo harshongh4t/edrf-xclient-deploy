@@ -4,10 +4,20 @@
 `oc`, `helm`, Git Bash, or Artifactory access are already set up. Follow the parts in order,
 because later steps depend on resources that earlier steps create.
 
-**How deployment works now:** you receive a **bundle** (`edrf-xclient-bundle-<version>.tar.gz`)
-containing the container image, the Helm chart, and a script, `deploy.sh`. **`deploy.sh` does
-the install.** It runs `helm upgrade --install` for you, so the same command handles both a
-fresh install and an upgrade of an existing release. Don't run `helm install` yourself.
+**How deployment works:** you receive a **bundle** (`edrf-xclient-bundle-<version>.tar.gz`)
+containing the container image, the Helm chart, and two scripts:
+
+- **`extract-coninfo.sh`** reads the ePO SmartInstaller (`TrellixSmartInstall.sh`) and produces
+  a Kubernetes Secret manifest, `epo-coninfo.yml`. That secret holds `coninfo.xml`, the file
+  the agent uses to register with ePO. **You must create this secret before deploying.**
+- **`deploy.sh`** does the install. It checks that the `epo-coninfo` secret exists, then runs
+  `helm upgrade --install` for you, so the same command handles both a fresh install and an
+  upgrade of an existing release. Don't run `helm install` yourself.
+
+> **Changed in build 50.99.0.150:** the agent no longer takes an ePO IP, user, and password.
+> `deploy.sh` no longer accepts `--epo-ip`, `--epo-user`, or `--epo-password` (passing them
+> fails with `ERROR: Unknown option`). ePO connection details now come only from the
+> `epo-coninfo` secret (Part E). If you're upgrading from an older build, see Part L.
 
 This guide covers three shells: **PowerShell**, **Command Prompt (`cmd.exe`)**, and
 **Linux/Mac (bash/zsh)**.
@@ -15,11 +25,11 @@ This guide covers three shells: **PowerShell**, **Command Prompt (`cmd.exe`)**, 
 - Every `oc` and `helm` command is plain text that runs the same in all three shells, so it
   appears once with no shell label.
 - A few steps really do differ by shell (setting an environment variable, extracting an
-  archive, editing PATH, running `deploy.sh`). These appear as labeled blocks: **PowerShell**,
-  **cmd.exe**, **Linux/Mac**. Use the one that matches your terminal.
-- **`deploy.sh` is a bash script.** It doesn't run directly in `cmd.exe` or PowerShell. On
-  Windows you need **Git for Windows**, which provides Git Bash (Part A3). Linux and Mac
-  already have bash.
+  archive, editing PATH, running the bundle's scripts). These appear as labeled blocks:
+  **PowerShell**, **cmd.exe**, **Linux/Mac**. Use the one that matches your terminal.
+- **`deploy.sh` and `extract-coninfo.sh` are bash scripts.** They don't run directly in
+  `cmd.exe` or PowerShell. On Windows you need **Git for Windows**, which provides Git Bash
+  (Part A3). Linux and Mac already have bash.
 - PowerShell aliases `curl` to `Invoke-WebRequest`, so use `curl.exe` wherever `curl` appears
   below in PowerShell.
 
@@ -29,8 +39,8 @@ which deployment mode to use.
 > **Namespace note:** the examples below use `edrf-tests` as a placeholder. This name is
 > expected to change in a future release. Use whatever namespace your team has standardized on.
 
-> **Credentials note:** never commit real passwords, tokens, or a `values.yaml` containing
-> them to any git repository.
+> **Credentials note:** never commit real passwords, tokens, `TrellixSmartInstall.sh`,
+> `epo-coninfo.yml`, or a `values.yaml` containing real values to any git repository.
 
 ---
 
@@ -41,11 +51,14 @@ which deployment mode to use.
 | **OpenShift / `oc`** | Red Hat's Kubernetes distribution. `oc` is its CLI (a superset of `kubectl`). |
 | **Project / Namespace** | An isolated area in the cluster. "Project" is OpenShift's name for a Kubernetes Namespace. |
 | **Helm / chart / release** | Helm is a package manager for Kubernetes. A **chart** is the package (the `edrf-xclient/` folder in the bundle). A **release** is one installed instance of that chart in a namespace (named `edrf-xclient`). |
-| **Bundle** | `edrf-xclient-bundle-<version>.tar.gz`, the deliverable containing `image.tar`, the `edrf-xclient/` chart, and `deploy.sh`. |
+| **Bundle** | `edrf-xclient-bundle-<version>.tar.gz`, the deliverable containing `image.tar`, the `edrf-xclient/` chart, `deploy.sh`, and `extract-coninfo.sh`. |
 | **`deploy.sh`** | The bash script in the bundle that performs the install or upgrade. |
-| **Git Bash** | A bash shell for Windows, installed with Git for Windows. Required on Windows to run `deploy.sh`. |
+| **`extract-coninfo.sh`** | The bash script in the bundle that turns the ePO SmartInstaller into the `epo-coninfo` secret manifest. |
+| **SmartInstaller** | `TrellixSmartInstall.sh`, the Linux agent installer downloaded from the ePO console. It contains `coninfo.xml`. |
+| **`coninfo.xml` / `epo-coninfo`** | `coninfo.xml` holds everything the agent needs to register with ePO (server address, certificates, keys). `epo-coninfo` is the Kubernetes Secret that stores it. The name is fixed, because the chart looks for exactly `epo-coninfo`. |
+| **Git Bash** | A bash shell for Windows, installed with Git for Windows. Required on Windows to run the bundle's scripts. |
 | **DaemonSet** | A workload that runs exactly one pod on every node. This is how the chart deploys the XClient agent. |
-| **Secret / ConfigMap** | Kubernetes objects for sensitive values (Secret) and non-sensitive config (ConfigMap). |
+| **Secret** | A Kubernetes object for sensitive values. |
 | **ServiceAccount (SA)** | The identity a pod runs as (`edrf-admin` here). |
 | **SCC** | Security Context Constraint, OpenShift's permission gate for pods that need host access. This chart **creates its own reduced-privilege SCC** (`edrf-xclient-<namespace>`) instead of using the built-in `privileged` SCC. Creating an SCC needs cluster-level permission (Part B2). |
 | **Artifactory** | Trellix's private container registry (`artifactory.trellix.com`), where the agent image is hosted. |
@@ -53,16 +66,168 @@ which deployment mode to use.
 
 ---
 
+## Quick start — Full command sequence (Windows or Linux jumpbox)
+
+This is the complete install/upgrade sequence on one page, for when the tools are installed
+and you're logged in. It's the sequence used to deploy build 50.99.0.150 in registry mode. If
+anything here is unfamiliar or fails, follow the detailed parts below (Parts A–I).
+
+Replace every `<...>` placeholder with your own values. **Never run a command with a `<...>`
+placeholder still in it.** For example, a literal `sha256:<digest>` makes every pod fail with
+`InvalidImageName`.
+
+| | Windows jumpbox | Linux jumpbox |
+|---|---|---|
+| Extra tool needed | **Git for Windows** (Part A3), because the bundle's scripts are bash | None, because bash is built in |
+| Shell used below | `cmd.exe` | bash |
+
+### Step 1 — Pre-checks
+
+The same commands on both:
+```
+oc whoami
+oc get ns <namespace>
+oc get secret artifactory-pull-secret -n <namespace>
+oc auth can-i create secrets -n <namespace>
+oc auth can-i create securitycontextconstraints
+oc auth can-i create clusterroles
+oc auth can-i create rolebindings -n <namespace>
+```
+**Expected:** your identity, the namespace `Active`, the pull secret listed, and `yes` four
+times. If the namespace or pull secret doesn't exist, create them first (Parts D and F).
+`oc auth can-i create securitycontextconstraints` also prints a "not namespace scoped"
+warning, which is normal.
+
+### Step 2 — Create a folder and extract the bundle
+
+**Windows (`cmd.exe`):**
+```cmd
+mkdir C:\edrf-deploy\bundle-<version>
+move C:\path\to\edrf-xclient-bundle-<version>.tar.gz C:\edrf-deploy\bundle-<version>\
+cd /d C:\edrf-deploy\bundle-<version>
+tar -xzf edrf-xclient-bundle-<version>.tar.gz
+dir
+```
+**Linux:**
+```bash
+mkdir -p ~/edrf-deploy/bundle-<version>
+mv /path/to/edrf-xclient-bundle-<version>.tar.gz ~/edrf-deploy/bundle-<version>/
+cd ~/edrf-deploy/bundle-<version>
+tar -xzf edrf-xclient-bundle-<version>.tar.gz
+ls -la
+```
+**Expected:** `image.tar`, `edrf-xclient/`, `deploy.sh`, `extract-coninfo.sh`. If `tar` creates
+a subfolder named `edrf-xclient-bundle-<version>`, `cd` into it. Every later command runs
+from the folder that contains `deploy.sh`.
+
+### Step 3 — Create the `epo-coninfo` secret
+
+Download the **Linux** SmartInstaller (`TrellixSmartInstall.sh`) from the ePO console (Part
+B4) and save it into the bundle folder. Then:
+
+**Windows (`cmd.exe`, one line):**
+```cmd
+"C:\Program Files\Git\bin\bash.exe" extract-coninfo.sh TrellixSmartInstall.sh <namespace>
+```
+**Linux:**
+```bash
+bash extract-coninfo.sh TrellixSmartInstall.sh <namespace>
+```
+**Expected:** `[1/5]` to `[5/5]`, then `Done.` and `Output file : epo-coninfo.yml`.
+
+Then, the same on both:
+```
+oc apply -f epo-coninfo.yml
+oc get secret epo-coninfo -n <namespace>
+```
+**Expected:** `secret/epo-coninfo created`, then one row named `epo-coninfo`.
+
+### Step 4 — Get the image digest and dry-run
+
+Get the digest for this build from Artifactory (Part C). Then dry-run, using the same command
+on both:
+```
+helm upgrade --install edrf-xclient ./edrf-xclient -n <namespace> --set image.repository="<image_repo>" --set image.digest="sha256:<digest>" --set imagePullSecret="artifactory-pull-secret" --set deploymentDetails.clusterName="<cluster_name>" --dry-run=client
+```
+**Expected:** rendered manifests, `STATUS: pending-upgrade`, `DESCRIPTION: Dry run complete`,
+and no `required` errors. Nothing changes on the cluster.
+
+To check just the image line, append `| findstr "image:"` (Windows) or `| grep "image:"`
+(Linux). It must end in `@sha256:` plus 64 hex characters, with no `<` or `>`.
+
+### Step 5 — Install or upgrade with `deploy.sh`
+
+**Windows (`cmd.exe`, one line):**
+```cmd
+"C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace <namespace> --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret
+```
+**Linux:**
+```bash
+chmod +x deploy.sh
+./deploy.sh \
+  --namespace <namespace> \
+  --cluster-name <cluster_name> \
+  --image-repo <image_repo> \
+  --image-digest sha256:<digest> \
+  --image-pull-secret artifactory-pull-secret
+```
+
+- **Windows:** don't type `./deploy.sh` on its own in `cmd.exe`, and keep the command on one
+  line.
+- **Linux:** `chmod +x` is needed because the extracted script may not be executable
+  (otherwise you get `Permission denied`). `bash deploy.sh ...` also works.
+
+**Expected:**
+```
+==> Mode: registry (image: <image_repo>@sha256:<digest>)
+==> Installing Helm chart
+Release "edrf-xclient" has been upgraded. Happy Helming!
+STATUS: deployed
+REVISION: <n>
+==> Deployment complete. Check pod status:
+```
+
+### Step 6 — Verify
+
+The same commands on both:
+```
+helm list -n <namespace>
+oc rollout status ds/edrf-xclient-container-security -n <namespace>
+oc get pods -n <namespace> -o wide
+oc exec -n <namespace> <pod-name> -- ls -l /var/McAfee/agent/coninfo.xml
+oc logs -n <namespace> <pod-name>
+```
+**Expected:** release `deployed`, rollout `successfully rolled out` (an upgrade can take 20–25
+minutes), one `1/1 Running` pod per Linux worker node with `RESTARTS 0`, `coninfo.xml` present
+in the pod, and logs showing the agent provisioning against ePO. Then confirm the nodes appear
+in the ePO console.
+
+### Windows vs. Linux at a glance
+
+| Step | Windows (`cmd.exe`) | Linux |
+|---|---|---|
+| Tool prerequisite | Install Git for Windows | Nothing extra |
+| Create folder | `mkdir C:\edrf-deploy\bundle-<version>` | `mkdir -p ~/edrf-deploy/bundle-<version>` |
+| Move bundle | `move <src> <dest>` | `mv <src> <dest>` |
+| Change folder | `cd /d C:\edrf-deploy\bundle-<version>` | `cd ~/edrf-deploy/bundle-<version>` |
+| List files | `dir` | `ls -la` |
+| Run `extract-coninfo.sh` | `"C:\Program Files\Git\bin\bash.exe" extract-coninfo.sh ...` | `bash extract-coninfo.sh ...` |
+| Run `deploy.sh` | `"C:\Program Files\Git\bin\bash.exe" ./deploy.sh ...` (one line) | `chmod +x deploy.sh` then `./deploy.sh ...` |
+| Filter output | `\| findstr "image:"` | `\| grep "image:"` |
+| `oc` / `helm` / `tar` commands | Same | Same |
+
+---
+
 ## Part 0 — Choose your machine and deployment mode
 
 ### 0.1 Which machine does what
 
-This deployment touches two networks, and many corporate environments don't let one machine
-reach both:
+This deployment touches up to three systems, and many corporate environments don't let one
+machine reach all of them:
 
 1. The **OpenShift cluster API**, needed for every `oc`, `helm`, and `deploy.sh` command.
-2. **Artifactory**, on the general corporate network. You only need this for Part C (image
-   digest lookup) in registry mode.
+2. **Artifactory**, needed only for Part C (image digest lookup) in registry mode.
+3. The **ePO console** (in a browser), needed only to download the SmartInstaller (Part B4).
 
 A locked-down **jumpbox** dedicated to cluster administration often has no route to the
 general internet. An everyday workstation usually has Artifactory access but no path to the
@@ -80,8 +245,9 @@ curl -v --max-time 10 https://artifactory.trellix.com
   - **Part C only** (looking up the image repository and digest): run it from your workstation.
     You only need `curl` and your Artifactory credentials (Part B3) there.
   - **Everything else** stays on the jumpbox.
-  - The only values to carry between machines are the two short strings Part C produces
-    (image repository and digest).
+  - Values to carry between machines: the image repository and digest (two short strings), and
+    `TrellixSmartInstall.sh` if you downloaded it on a different machine. Copy the
+    SmartInstaller as a file and don't open it in an editor (Part B4).
 
 ### 0.2 Which deployment mode
 
@@ -89,141 +255,17 @@ curl -v --max-time 10 https://artifactory.trellix.com
 
 | Mode | Use when | You must provide |
 |---|---|---|
-| **Registry** (default) | The cluster's worker nodes can pull images from Artifactory (or an internal mirror) | A pull secret (Part E), plus the image repository and digest (Part C) |
-| **Airgap** | The cluster can't reach any external registry | Docker on the jumpbox, plus a one-time registry route change by a cluster-admin (Part G2). No pull secret, repository, or digest. |
+| **Registry** (default) | The cluster's worker nodes can pull images from Artifactory (or an internal mirror) | A pull secret (Part F), plus the image repository and digest (Part C) |
+| **Airgap** | The cluster can't reach any external registry | `skopeo`, `docker`, or `podman` on the jumpbox. You push `image.tar` to an internal registry yourself, then give `deploy.sh` that registry's repository and the pushed digest (Part H2). No pull secret. |
 
 If you aren't sure, start with **registry mode**. If pods later fail with `ImagePullBackOff`
 and a network timeout (not an authentication error), the nodes can't reach Artifactory and you
 need airgap mode.
 
+Both modes need the `epo-coninfo` secret (Part E).
+
 Every part below is tagged **(jumpbox)**, **(any machine)**, **(Artifactory-reachable
 machine)**, **(registry mode)**, or **(airgap mode)**.
-
----
-
-## Quick start — Full command sequence (Windows or Linux jumpbox)
-
-This is the complete install/upgrade sequence on one page, for when the tools are installed
-and you're logged in. It is the same sequence used to upgrade to build 50.99.0.144 in
-registry mode. If anything here is unfamiliar or fails, follow the detailed parts below
-(Parts A–H).
-
-Replace every `<...>` placeholder with your own values (Parts B3, B4, C).
-
-| | Windows jumpbox | Linux jumpbox |
-|---|---|---|
-| Extra tool needed | **Git for Windows** (Part A3), because `deploy.sh` is a bash script | None, because bash is built in |
-| Shell used below | `cmd.exe` | bash |
-
-### Step 1 — Pre-checks
-
-The same commands on both:
-```
-oc whoami
-oc get secret artifactory-pull-secret -n <namespace>
-oc auth can-i create securitycontextconstraints
-oc auth can-i create clusterroles
-oc auth can-i create rolebindings -n <namespace>
-```
-**Expected:** your identity, one secret row of type `kubernetes.io/dockerconfigjson`, and `yes`
-three times. If the secret doesn't exist, create it first (Parts D and E).
-
-### Step 2 — Create a folder and extract the bundle
-
-**Windows (`cmd.exe`):**
-```cmd
-mkdir C:\edrf-deploy\bundle
-move C:\path\to\edrf-xclient-bundle-<version>.tar.gz C:\edrf-deploy\bundle\
-cd /d C:\edrf-deploy\bundle
-tar -xzf edrf-xclient-bundle-<version>.tar.gz
-dir
-```
-**Linux:**
-```bash
-mkdir -p ~/edrf-deploy/bundle
-mv /path/to/edrf-xclient-bundle-<version>.tar.gz ~/edrf-deploy/bundle/
-cd ~/edrf-deploy/bundle
-tar -xzf edrf-xclient-bundle-<version>.tar.gz
-ls -la
-```
-**Expected:** `image.tar`, `edrf-xclient/`, `deploy.sh`.
-
-### Step 3 — Update `values.yaml` and dry-run
-
-Fill in `edrf-xclient/values.yaml` (ePO IP, user, password, image repository and digest, pull
-secret name, cluster name; see Appendix A) using any text editor. On Windows that can be
-`notepad edrf-xclient\values.yaml`. On Linux, use `vi edrf-xclient/values.yaml` or `nano`.
-Don't commit this file anywhere, because it contains the ePO password.
-
-Then dry-run, using the same command on both:
-```
-helm upgrade --install edrf-xclient ./edrf-xclient -n <namespace> --dry-run=client
-```
-**Expected:** rendered manifests, `STATUS: pending-upgrade`, `DESCRIPTION: Dry run complete`,
-and no `required` errors. Nothing changes on the cluster.
-
-### Step 4 — Install or upgrade with `deploy.sh`
-
-**Windows (`cmd.exe`, one line):**
-```cmd
-"C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace <namespace> --epo-ip <epo_ip> --epo-user <epo_user> --epo-password "<epo_password>" --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret
-```
-**Linux:**
-```bash
-chmod +x deploy.sh
-./deploy.sh \
-  --namespace <namespace> \
-  --epo-ip <epo_ip> \
-  --epo-user <epo_user> \
-  --epo-password '<epo_password>' \
-  --cluster-name <cluster_name> \
-  --image-repo <image_repo> \
-  --image-digest sha256:<digest> \
-  --image-pull-secret artifactory-pull-secret
-```
-
-- **Windows:** don't type `./deploy.sh` on its own in `cmd.exe`. Keep the command on one
-  line, and use double quotes around the password.
-- **Linux:** `chmod +x` is needed because the extracted script may not be executable
-  (otherwise you get `Permission denied`). `bash deploy.sh ...` also works. Use single quotes
-  around the password.
-
-**Expected:**
-```
-==> Mode: registry (image: <image_repo>@sha256:<digest>)
-==> Installing Helm chart
-Release "edrf-xclient" has been upgraded. Happy Helming!
-STATUS: deployed
-REVISION: <n>
-DESCRIPTION: Upgrade complete
-==> Deployment complete. Check pod status:
-```
-
-### Step 5 — Verify
-
-The same commands on both:
-```
-helm list -n <namespace>
-oc rollout status ds/edrf-xclient-container-security -n <namespace>
-oc get pods -n <namespace> -o wide -w
-```
-**Expected:** release `deployed` with a new revision, rollout `successfully rolled out`, and
-one `1/1 Running` pod per Linux worker node with `RESTARTS 0`. An upgrade rollout can take
-20–25 minutes (Part H1). Press Ctrl+C to stop `-w`.
-
-### Windows vs. Linux at a glance
-
-| Step | Windows (`cmd.exe`) | Linux |
-|---|---|---|
-| Tool prerequisite | Install Git for Windows | Nothing extra |
-| Create folder | `mkdir C:\edrf-deploy\bundle` | `mkdir -p ~/edrf-deploy/bundle` |
-| Move bundle | `move <src> C:\edrf-deploy\bundle\` | `mv <src> ~/edrf-deploy/bundle/` |
-| Change folder | `cd /d C:\edrf-deploy\bundle` | `cd ~/edrf-deploy/bundle` |
-| List files | `dir` | `ls -la` |
-| Edit values | `notepad edrf-xclient\values.yaml` | `vi edrf-xclient/values.yaml` |
-| Run script | `"C:\Program Files\Git\bin\bash.exe" ./deploy.sh ...` (one line) | `chmod +x deploy.sh` then `./deploy.sh ...` |
-| Password quoting | `"<epo_password>"` | `'<epo_password>'` |
-| `oc` / `helm` / `tar` commands | Same | Same |
 
 ---
 
@@ -233,9 +275,9 @@ one `1/1 Running` pod per Linux worker node with `RESTARTS 0`. An upgrade rollou
 |---|---|---|---|
 | `oc` | Everything | Install (A1) | Install (A1) |
 | `helm` (v3) | `deploy.sh` calls it internally, plus the dry-run | Install (A2) | Install (A2) |
-| Git for Windows (Git Bash) | Running `deploy.sh` | **Install (A3)** | Not needed (bash is built in) |
+| Git for Windows (Git Bash) | Running `extract-coninfo.sh` and `deploy.sh` | **Install (A3)** | Not needed (bash is built in) |
 | `curl`, `tar` | Digest lookup, extracting the bundle | Built into Windows 10/11 | Built in |
-| Docker CLI | **Airgap mode only** | Install (A4) | Install (A4) |
+| `skopeo`, `docker`, or `podman` | **Airgap mode only** | Install one (A4) | Install one (A4) |
 
 ### A1. Install the `oc` CLI
 
@@ -357,9 +399,10 @@ helm version
 
 ### A3. Install Git for Windows (Windows only)
 
-`deploy.sh` is a bash script. Running it straight from `cmd.exe` fails with
-`'.' is not recognized as an internal or external command`. Git for Windows provides
-**Git Bash**, which runs it.
+`deploy.sh` and `extract-coninfo.sh` are bash scripts. Running them straight from `cmd.exe`
+fails with `'.' is not recognized as an internal or external command`. Git for Windows
+provides **Git Bash**, which runs them, along with the tools `extract-coninfo.sh` needs (`awk`,
+`dd`, `base64`, `tail`, and others).
 
 **Install:**
 ```
@@ -389,29 +432,32 @@ this guide shows `C:\Program Files\Git\bin\bash.exe`.
 > `helm.exe` or your cluster login, so `deploy.sh` fails with `oc: command not found`. Always
 > call Git Bash by its full path, as shown above.
 
-### A4. Install the Docker CLI (airgap mode only)
+### A4. Install an image tool (airgap mode only)
 
-Skip this in registry mode. In airgap mode, `deploy.sh` uses Docker to load `image.tar` and
-push it to the cluster's internal registry.
+Skip this in registry mode. In airgap mode you push `image.tar` to your internal registry
+yourself, with any one of:
 
-- **Windows:** Docker Desktop (https://docs.docker.com/desktop/setup/install/windows-install/),
-  or whatever your organization approves.
-- **Linux:** your distribution's `docker` package or Docker Engine.
-- **Mac:** Docker Desktop.
+- **`skopeo`** (recommended, because it needs no background daemon). Linux:
+  `sudo dnf install skopeo` or `sudo apt install skopeo`.
+- **`podman`**. Linux: `sudo dnf install podman` or `sudo apt install podman`. Windows: Podman
+  Desktop.
+- **`docker`**. Linux: Docker Engine. Windows/Mac: Docker Desktop (or whatever your
+  organization approves).
 
-**Verify** (the daemon must be running, not just the CLI installed):
+**Verify** whichever one you installed:
 ```
+skopeo --version
+podman version
 docker version
 ```
-
-**Expected:** both a `Client` and a `Server` section. If only `Client` appears, start Docker
-Desktop or the Docker service.
+For `docker`, the output must include both a `Client` and a `Server` section. If only `Client`
+appears, start Docker Desktop or the Docker service.
 
 ---
 
 ## Part B — Collect access and credentials
 
-B1, B2, and B5 run on the jumpbox. B3 and B4 only need a browser and can run from any machine.
+B1, B2, and B5 run on the jumpbox. B3 and B4 need a browser and can run from any machine.
 
 ### B1 (jumpbox). OpenShift cluster login
 
@@ -463,10 +509,11 @@ individual logins.
    echo 'export KUBECONFIG=/home/<you>/kubeconfig' >> ~/.bashrc    # or ~/.zshrc
    ```
 
-> **Windows and `deploy.sh`:** run `deploy.sh` from the **same** `cmd.exe` or PowerShell
-> window where you logged in or set `KUBECONFIG` (Part G1 shows how). Git Bash launched from
-> that window inherits your PATH and login. A Git Bash window opened separately from the
-> Start menu won't have a `KUBECONFIG` set with `set` or `$env:` unless you made it permanent.
+> **Windows and the bundle scripts:** run `deploy.sh` from the **same** `cmd.exe` or
+> PowerShell window where you logged in or set `KUBECONFIG` (Part H1 shows how). Git Bash
+> launched from that window inherits your PATH and login. A Git Bash window opened separately
+> from the Start menu won't have a `KUBECONFIG` set with `set` or `$env:` unless you made it
+> permanent.
 
 **Verify login (either option, the same in every shell):**
 ```
@@ -487,21 +534,24 @@ problem reaching the API server, not a login problem.
 
 ### B2 (jumpbox). Confirm cluster permissions
 
-This chart creates namespaced resources (ServiceAccount, RoleBinding, Secret, ConfigMap,
-DaemonSet) **and cluster-wide resources**: a custom **SecurityContextConstraints** and a
-**ClusterRole**. Creating cluster-wide resources usually needs cluster-admin rights.
+You create two secrets by hand (`epo-coninfo` and the pull secret). The chart creates
+namespaced resources (ServiceAccount, RoleBinding, DaemonSet) **and cluster-wide resources**: a
+custom **SecurityContextConstraints** and a **ClusterRole**. Creating cluster-wide resources
+usually needs cluster-admin rights.
 
-Check all three before going further:
+Check all four before going further:
 ```
+oc auth can-i create secrets -n edrf-tests
 oc auth can-i create rolebindings -n edrf-tests
 oc auth can-i create clusterroles
 oc auth can-i create securitycontextconstraints
 ```
 
-**Expected:** `yes` for all three.
+**Expected:** `yes` for all four. The SCC check also prints
+`Warning: resource 'securitycontextconstraints' is not namespace scoped`, which is normal.
 
 If any of them return `no`, stop here. Ask your OpenShift platform or cluster-admin team to
-grant the permission, or to run `deploy.sh` (Part G) for you. Without it the install fails
+grant the permission, or to run `deploy.sh` (Part H) for you. Without it the install fails
 partway with a `forbidden` error.
 
 ### B3 (any machine with a browser). Artifactory credentials (registry mode)
@@ -525,48 +575,55 @@ doesn't accept SSO passwords for CLI or API pulls.
 | Expires In | e.g. `11 month(s) 30 day(s)` | Tells you when to generate a new one. |
 | **Token ID** | short UUID, e.g. `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` | No, this isn't a credential. Using it as a password fails with `401 Unauthorized`. |
 
-### B4 (any machine, information only). ePO server details
+### B4 (any machine with a browser). ePO SmartInstaller and cluster name
 
-The agent needs:
-- ePO IP or hostname
-- ePO username
-- ePO password
+**SmartInstaller.** The agent gets its ePO connection details from `coninfo.xml`, which is
+packed inside the ePO **Linux SmartInstaller**. To download it:
 
-Get these from the team that manages ePO for your environment. A dedicated service account is
-better than a personal login.
+1. Log in to the **ePO console** that these cluster nodes should report to.
+2. Go to **Agent → Download Agent**. The exact menu wording can vary between ePO versions.
+   Look for the agent deployment or SmartInstaller download page.
+3. Choose the **Linux** SmartInstaller. The file is `TrellixSmartInstall.sh` (several MB).
+4. Save it, then copy it into the bundle folder on the jumpbox (Part B5).
 
-You also need a **cluster name**, the label this cluster will have in ePO. Get the cluster's
-infrastructure name with:
+> **Don't open or edit `TrellixSmartInstall.sh` in a text editor.** It's a shell script with a
+> binary payload appended, and saving it from an editor can corrupt it. Copy it only as a
+> file. Treat it as sensitive, because it contains your ePO server's certificates and keys.
+
+If you don't have ePO console access, ask your ePO admin for the Linux SmartInstaller.
+
+**Cluster name.** You also need a **cluster name**, the label this cluster will have in ePO.
+Get the cluster's infrastructure name with:
 ```
 oc get infrastructure cluster -o jsonpath='{.status.infrastructureName}'
 ```
 This returns something like `mycluster-ab1cd`, where the part before the random suffix
 (`mycluster`) is usually the value to use. Node names follow the same pattern
-(`mycluster-ab1cd-worker-a-xyz12`). If other clusters already report to your ePO, follow their
-naming convention.
+(`mycluster-ab1cd-worker-a-xyz12`). If other clusters already report to your ePO, follow
+their naming convention.
 
 ### B5 (jumpbox). Get and extract the bundle
 
 Get `edrf-xclient-bundle-<version>.tar.gz` from your build or release team. Copy it to the
-jumpbox, then extract it into a **new, empty folder** so it doesn't mix with older chart
-copies. `tar` is built into Windows 10/11, so the extract command is the same everywhere.
+jumpbox, then extract it into a **new, empty folder** so it doesn't mix with older bundles.
+`tar` is built into Windows 10/11, so the extract command is the same everywhere.
 
 **PowerShell:**
 ```powershell
-mkdir C:\edrf-deploy\bundle
-cd C:\edrf-deploy\bundle
+mkdir C:\edrf-deploy\bundle-<version>
+cd C:\edrf-deploy\bundle-<version>
 tar -xzf C:\path\to\edrf-xclient-bundle-<version>.tar.gz
 ```
 **cmd.exe:**
 ```cmd
-mkdir C:\edrf-deploy\bundle
-cd /d C:\edrf-deploy\bundle
+mkdir C:\edrf-deploy\bundle-<version>
+cd /d C:\edrf-deploy\bundle-<version>
 tar -xzf C:\path\to\edrf-xclient-bundle-<version>.tar.gz
 ```
 **Linux/Mac:**
 ```bash
-mkdir -p ~/edrf-deploy/bundle
-cd ~/edrf-deploy/bundle
+mkdir -p ~/edrf-deploy/bundle-<version>
+cd ~/edrf-deploy/bundle-<version>
 tar -xzf /path/to/edrf-xclient-bundle-<version>.tar.gz
 ```
 
@@ -576,12 +633,17 @@ dir          (Windows)
 ls -la       (Linux/Mac)
 ```
 
-**Expected:** three items:
+**Expected:** four items:
 ```text
-image.tar        # container image (only used in airgap mode)
-edrf-xclient/    # Helm chart
-deploy.sh        # install script
+image.tar             # container image (only used in airgap mode)
+edrf-xclient/         # Helm chart
+deploy.sh             # install script (registry and airgap modes)
+extract-coninfo.sh    # builds the epo-coninfo secret manifest (run before deploy.sh)
 ```
+If you see a single folder named `edrf-xclient-bundle-<version>` instead, `cd` into it.
+Everything else in this guide runs from the folder that contains `deploy.sh`.
+
+Now copy `TrellixSmartInstall.sh` (Part B4) into this same folder.
 
 The chart layout, for reference:
 ```text
@@ -590,21 +652,19 @@ edrf-xclient/
 ├── values.yaml                  # default values (deploy.sh flags override these)
 └── templates/
     ├── 01-serviceaccount.yaml   # ServiceAccount, custom SCC, ClusterRole, RoleBinding
-    ├── 02-epo-details.yaml      # ConfigMap + Secret holding ePO connection details
-    └── 03-deploy-edrf.yaml      # the DaemonSet that runs XClient on every Linux node
+    └── 02-deploy-edrf.yaml      # the DaemonSet; mounts the epo-coninfo secret
 ```
 
-**You don't need to edit `values.yaml`.** `deploy.sh` passes every required value as a flag.
-If you do edit it (for example, to run the dry-run in Part F without `--set` flags), keep
-that copy out of git, because it would contain the ePO password.
-
-Run all later commands from this bundle folder.
+**You don't need to edit `values.yaml`.** `deploy.sh` passes every required value as a flag
+(Appendix A lists them). If you do edit it, keep that copy out of git.
 
 ---
 
 ## Part C (Artifactory-reachable machine, registry mode) — Get the image repository and digest
 
-Skip this part in airgap mode.
+Skip this part in airgap mode (Part H2 covers getting the digest there).
+
+**The digest changes with every build.** Never reuse the digest from a previous build.
 
 If Part 0 showed the jumpbox has no internet access, run this part on your workstation. You
 only need `curl` and your Artifactory credentials.
@@ -613,9 +673,11 @@ You need two values for `deploy.sh`:
 - `--image-repo`, e.g. `artifactory.trellix.com/edrf-xclient-container-security/trellix-edrf`
 - `--image-digest`, e.g. `sha256:<64 hex characters>`
 
-A typical Artifactory browse URL for a build looks like
-`https://artifactory.trellix.com/artifactory/edrf-xclient-container-security/trellix-edrf/114/`,
-where `114` is the build number. Use the build number that matches your bundle.
+### Find the build folder
+
+In a browser, open Artifactory and browse to `edrf-xclient-container-security` →
+`trellix-edrf`. There's one folder per build. Find the folder for your bundle's build and
+note its exact name (`<build>` below).
 
 ### Method 1 (preferred) — Artifactory Storage API
 
@@ -644,14 +706,17 @@ Your digest is `sha256:` followed by the `sha256` value. Your image repository i
 artifactory.trellix.com/edrf-xclient-container-security/trellix-edrf
 ```
 
-**If the response isn't clean JSON**, re-run with `-v` instead of `-s` and check the HTTP
+**Without curl:** in the Artifactory web UI, click `manifest.json` inside the build folder.
+The file's info panel shows its **SHA-256** checksum, which is the same value.
+
+**If the curl response isn't clean JSON**, re-run with `-v` instead of `-s` and check the HTTP
 status:
 - **`200 OK` with `"children": [...]`** means `<build>` is a folder and `manifest.json` isn't
   the real filename. List the folder (remove `manifest.json` from the URL) and retry with the
   real name.
 - **`401` / `403`** means the username or token is wrong, expired, or lacks read access. Check
   you used the **Reference Token** (Part B3).
-- **`404`** means the repo key or build number is wrong. Confirm the path with your build team.
+- **`404`** means the repo key or build folder is wrong. Confirm the path in the browser.
 - **`302` redirect or an HTML login page** means this auth method is rejected for API calls.
   Check with your Artifactory admins.
 
@@ -678,16 +743,15 @@ curl -sI -u "<artifactory_user>:<artifactory_token>" -H "Accept: application/vnd
 
 ## Part D (jumpbox) — Create the namespace
 
-Create the namespace **before** the pull secret, because the secret is created inside it.
+Create the namespace **before** anything else on the cluster. The `epo-coninfo` secret (Part
+E) and the pull secret (Part F) are created inside it, and both must exist before `deploy.sh`
+runs. `deploy.sh` passes `--create-namespace` to Helm, but that happens too late to hold the
+secrets.
 
 ```
 oc new-project edrf-tests
 ```
-If it already exists:
-```
-oc project edrf-tests
-```
-**Verify:**
+If it already exists (for example, you're upgrading), skip this. To check:
 ```
 oc get ns edrf-tests
 ```
@@ -696,7 +760,84 @@ oc get ns edrf-tests
 
 ---
 
-## Part E (jumpbox, registry mode) — Create the Artifactory pull secret
+## Part E (jumpbox) — Create the ePO `epo-coninfo` secret (required, both modes)
+
+**This step is mandatory.** Every pod mounts `coninfo.xml` from the `epo-coninfo` secret at
+startup to register with ePO. `deploy.sh` checks for the secret and refuses to run without it
+(`ERROR: Secret 'epo-coninfo' not found`). If the secret is removed later, pods can't start.
+
+Do this once per namespace. Redo it only if you need to point the agents at a different ePO
+server, or the ePO server's certificates change (Part L).
+
+### E1. Put the SmartInstaller in the bundle folder
+
+Copy `TrellixSmartInstall.sh` from Part B4 into the bundle folder (the one containing
+`extract-coninfo.sh`). Check it's there:
+```
+dir TrellixSmartInstall.sh        (Windows)
+ls -la TrellixSmartInstall.sh     (Linux/Mac)
+```
+**Expected:** a file of several MB.
+
+### E2. Generate `epo-coninfo.yml`
+
+`extract-coninfo.sh` takes two arguments: the SmartInstaller file and your namespace. It
+extracts `coninfo.xml` and writes `epo-coninfo.yml` (a Secret manifest) into the **current
+folder**. It doesn't change anything on the cluster.
+
+**cmd.exe** (one line):
+```cmd
+"C:\Program Files\Git\bin\bash.exe" extract-coninfo.sh TrellixSmartInstall.sh edrf-tests
+```
+**PowerShell** (one line):
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" extract-coninfo.sh TrellixSmartInstall.sh edrf-tests
+```
+**Linux/Mac or Git Bash:**
+```bash
+bash extract-coninfo.sh TrellixSmartInstall.sh edrf-tests
+```
+
+**Expected:**
+```
+[1/5] Reading SmartInstaller: TrellixSmartInstall.sh
+      bootstrap_size = <n> bytes
+[2/5] Checking available disk space...
+[3/5] Locating archive marker...
+      Archive starts at line <n>
+[4/5] Extracting coninfo.xml...
+      coninfo.xml size: <n> bytes
+[5/5] Generating epo-coninfo.yml...
+
+Done.
+  Output file : epo-coninfo.yml
+  Secret name : epo-coninfo
+  Namespace   : edrf-tests
+```
+`coninfo.xml` is typically a few KB. The script needs free disk space of about twice the
+SmartInstaller's size for a temporary copy, which it deletes afterwards.
+
+Errors from this script are listed in Part K.
+
+### E3. Create the secret on the cluster
+
+```
+oc apply -f epo-coninfo.yml
+oc get secret epo-coninfo -n edrf-tests
+```
+**Expected:** `secret/epo-coninfo created` (or `configured` if it already existed), then one
+row: `epo-coninfo   Opaque   1`.
+
+The script's own output suggests `kubectl apply`. `oc apply` does exactly the same thing.
+
+- **Don't rename the secret.** The chart references exactly `epo-coninfo`.
+- **Delete `epo-coninfo.yml` afterwards**, or store it somewhere secure. It contains your ePO
+  connection details. The secret on the cluster stays. Never commit it, or
+  `TrellixSmartInstall.sh`, to git.
+
+---
+
+## Part F (jumpbox, registry mode) — Create the Artifactory pull secret
 
 Skip this part in airgap mode.
 
@@ -730,15 +871,17 @@ The secret's **name**, `artifactory-pull-secret`, is what you pass to `deploy.sh
 
 ---
 
-## Part F (jumpbox) — Dry-run the chart (recommended)
+## Part G (jumpbox) — Dry-run the chart (recommended)
 
 A dry-run catches missing or wrong values before anything changes on the cluster. Run it from
 the bundle folder with the same values you'll give `deploy.sh`. This is a single line and works
 in all three shells:
 
 ```
-helm upgrade --install edrf-xclient ./edrf-xclient -n edrf-tests --set epo.ip="<epo_ip>" --set epo.user="<epo_user>" --set epo.password="<epo_password>" --set deploymentDetails.clusterName="<cluster_name>" --set image.repository="<image_repo>" --set image.digest="sha256:<digest>" --set imagePullSecret="artifactory-pull-secret" --dry-run=client
+helm upgrade --install edrf-xclient ./edrf-xclient -n edrf-tests --set image.repository="<image_repo>" --set image.digest="sha256:<digest>" --set imagePullSecret="artifactory-pull-secret" --set deploymentDetails.clusterName="<cluster_name>" --dry-run=client
 ```
+(Airgap mode: use your internal registry's repository and digest from Part H2, and drop the
+`imagePullSecret` setting.)
 
 **Expected:** a long list of rendered manifests ending without errors. The output includes
 these lines, which are **normal for a dry-run**. Nothing was changed on the cluster:
@@ -747,28 +890,58 @@ Release "edrf-xclient" has been upgraded. Happy Helming!
 STATUS: pending-upgrade
 DESCRIPTION: Dry run complete
 ```
-The manifests should include a `SecurityContextConstraints` named `edrf-xclient-edrf-tests`, a
-`ClusterRole`, a `RoleBinding`, and a `DaemonSet` whose `image:` line ends in your digest.
+
+**Check the manifests for:**
+- a `SecurityContextConstraints` named `edrf-xclient-edrf-tests`, a `ClusterRole`, and a
+  `RoleBinding`
+- in the DaemonSet, a volume named `coninfo` with `secretName: epo-coninfo`, mounted at
+  `/var/McAfee/agent/coninfo.xml`
+- the `image:` line ending in your real digest
+
+**The dry-run doesn't validate the digest itself.** If you accidentally leave a placeholder
+like `sha256:<digest>` in the command, the dry-run still passes, but every pod later fails with
+`InvalidImageName`. To check just the image line, append a filter:
+```
+... --dry-run=client | findstr "image:"       (Windows)
+... --dry-run=client | grep "image:"          (Linux/Mac)
+```
+It must end in `@sha256:` followed by exactly 64 hex characters, with no `<` or `>`.
 
 An `execution error ... is required` means a value is missing or misspelled. Fix it and re-run.
 
 ---
 
-## Part G (jumpbox) — Run `deploy.sh`
+## Part H (jumpbox) — Run `deploy.sh`
 
-### G1. Registry mode
+`deploy.sh` first checks that the `edrf-xclient/` chart folder is next to it and that the
+`epo-coninfo` secret exists in the namespace. Then it runs `helm upgrade --install`. It accepts
+only these flags:
 
-Run from the bundle folder (the one containing `deploy.sh`). Replace every `<...>`
-placeholder. **Pick the block for your shell.**
+| Flag | Registry mode | Airgap mode |
+|---|---|---|
+| `--namespace` | Required | Required |
+| `--cluster-name` | Required | Required |
+| `--image-repo` | Required | Required (your internal registry) |
+| `--image-digest` | Required | Required (the digest you pushed) |
+| `--image-pull-secret` | Required | Not used |
+| `--mode` | Optional (`registry` is the default) | `airgap` |
+
+Any other flag (including the old `--epo-ip`, `--epo-user`, `--epo-password`) stops the
+script with `ERROR: Unknown option`.
+
+### H1. Registry mode
+
+Run from the bundle folder. Replace every `<...>` placeholder. **Pick the block for your
+shell.**
 
 **cmd.exe** (one line; launches Git Bash from this window so it inherits your login):
 ```cmd
-"C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace edrf-tests --epo-ip <epo_ip> --epo-user <epo_user> --epo-password "<epo_password>" --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret
+"C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace edrf-tests --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret
 ```
 
 **PowerShell** (one line; note the leading `&`):
 ```powershell
-& "C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace edrf-tests --epo-ip <epo_ip> --epo-user <epo_user> --epo-password "<epo_password>" --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret
+& "C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace edrf-tests --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret
 ```
 
 **Linux/Mac, or inside a Git Bash window:**
@@ -776,9 +949,6 @@ placeholder. **Pick the block for your shell.**
 chmod +x deploy.sh
 ./deploy.sh \
   --namespace edrf-tests \
-  --epo-ip <epo_ip> \
-  --epo-user <epo_user> \
-  --epo-password '<epo_password>' \
   --cluster-name <cluster_name> \
   --image-repo <image_repo> \
   --image-digest sha256:<digest> \
@@ -790,10 +960,6 @@ chmod +x deploy.sh
   Bash, as shown above.
 - In `cmd.exe` and PowerShell, keep the command on **one line**. The `\` line continuation
   only works in bash.
-- In `cmd.exe`, quote the password with **double quotes**. In bash, use **single quotes**
-  (so characters such as `$` and `!` aren't interpreted).
-- To see every flag the script accepts, run it with `--help`, e.g.
-  `"C:\Program Files\Git\bin\bash.exe" ./deploy.sh --help`.
 
 **Expected output:**
 ```
@@ -810,41 +976,126 @@ DESCRIPTION: Upgrade complete
     oc get pods -n edrf-tests
 ```
 On a first install, `Release "edrf-xclient" does not exist. Installing it now.` and
-`REVISION: 1` appear instead. Both are success.
+`REVISION: 1` appear instead. Both are success. (`--mode registry` is the default, and
+`image.tar` isn't used in this mode.)
 
-### G2. Airgap mode
+### H2. Airgap mode
 
-In airgap mode the script loads `image.tar`, finds the cluster's internal registry route, logs
-in with `oc registry login`, pushes the image, captures its digest, and installs, so you don't
-pass `--image-repo`, `--image-digest`, or `--image-pull-secret`.
+> Airgap mode is documented from the product README and the bundle's `deploy.sh`. It hasn't
+> yet been validated end-to-end on a test cluster for this guide.
 
-**Before the first airgap run:**
-1. Docker is installed and running on the jumpbox (Part A4).
-2. A cluster-admin exposes the internal registry route (one-time, cluster-wide):
-   ```
-   oc patch configs.imageregistry.operator.openshift.io/cluster --patch "{\"spec\":{\"defaultRoute\":true}}" --type=merge
-   ```
-   (The escaped double quotes work in `cmd.exe` and PowerShell. In bash you can use
-   `--patch '{"spec":{"defaultRoute":true}}'`.)
+In airgap mode **you push `image.tar` to an internal registry yourself**, then give
+`deploy.sh` that registry's repository and the pushed image's digest. No pull secret is used.
+(The comment at the top of `deploy.sh` still says the registry is auto-discovered, but the
+script's code requires `--image-repo` and `--image-digest`.)
+
+**Prerequisites:** `oc` logged in (Part B1), the `epo-coninfo` secret created (Part E), and
+`skopeo`, `docker`, or `podman` on the jumpbox (Part A4).
+
+#### H2.1. Choose the registry
+
+The most common choice is the **OpenShift internal registry**, which OpenShift trusts by
+default. Using it involves **two different addresses**:
+
+| Address | Example | Used for |
+|---|---|---|
+| **External route** | `default-route-openshift-image-registry.apps.<cluster-domain>` | **Pushing** from the jumpbox |
+| **Internal service** | `image-registry.openshift-image-registry.svc:5000` | **Pulling** by the pods, so this is what you pass to `deploy.sh` |
+
+The image path in either case is `<address>/<namespace>/trellix-edrf`.
+
+A cluster-admin exposes the external route once (cluster-wide):
+```
+oc patch configs.imageregistry.operator.openshift.io/cluster --patch "{\"spec\":{\"defaultRoute\":true}}" --type=merge
+```
+(The escaped double quotes work in `cmd.exe` and PowerShell. In bash you can use
+`--patch '{"spec":{"defaultRoute":true}}'`.)
+
+Get the route hostname:
+```
+oc get route default-route -n openshift-image-registry -o jsonpath="{.spec.host}"
+```
+
+If you use a different internal registry (for example, a corporate mirror), use its address for
+both pushing and `--image-repo`, and create a pull secret for it if it requires
+authentication.
+
+#### H2.2. Push `image.tar` and capture the digest
+
+Run from the bundle folder. Replace `<route>` with the hostname from H2.1. Use **one** tool.
+
+**skopeo** (recommended; Linux):
+```bash
+skopeo copy --dest-creds "$(oc whoami):$(oc whoami -t)" --digestfile digest.txt \
+  docker-archive:image.tar \
+  docker://<route>/edrf-tests/trellix-edrf:bundle
+cat digest.txt
+```
+
+**podman:**
+```bash
+oc registry login --registry=<route> --to=auth.json
+podman load -i image.tar
+podman tag trellix-edrf:bundle <route>/edrf-tests/trellix-edrf:bundle
+podman push --authfile auth.json --digestfile digest.txt <route>/edrf-tests/trellix-edrf:bundle
+cat digest.txt
+```
+
+**docker:**
+```bash
+oc registry login --registry=<route>
+docker load -i image.tar
+docker tag trellix-edrf:bundle <route>/edrf-tests/trellix-edrf:bundle
+docker push <route>/edrf-tests/trellix-edrf:bundle
+```
+`docker push` prints a final line such as `bundle: digest: sha256:<64 hex> size: <n>`.
+
+- **Expected:** a digest of the form `sha256:<64 hex characters>`. That's your
+  `--image-digest`.
+- **`x509: certificate signed by unknown authority`:** the route uses a certificate the
+  jumpbox doesn't trust. Add `--dest-tls-verify=false` (skopeo) or `--tls-verify=false`
+  (podman), or configure Docker's `insecure-registries`. Only do this if your security policy
+  allows it.
+- **Note:** `oc whoami -t` only works with a token login. With a kubeconfig that uses client
+  certificates, use `oc registry login` (podman/docker) or ask your admin for registry
+  credentials.
+
+Optionally confirm the image landed:
+```
+oc get imagestream trellix-edrf -n edrf-tests
+```
+
+#### H2.3. Deploy
+
+Pass the **internal service** address, not the route:
 
 **cmd.exe:**
 ```cmd
-"C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace edrf-tests --epo-ip <epo_ip> --epo-user <epo_user> --epo-password "<epo_password>" --cluster-name <cluster_name> --mode airgap
+"C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace edrf-tests --cluster-name <cluster_name> --mode airgap --image-repo image-registry.openshift-image-registry.svc:5000/edrf-tests/trellix-edrf --image-digest sha256:<digest>
 ```
 **PowerShell:**
 ```powershell
-& "C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace edrf-tests --epo-ip <epo_ip> --epo-user <epo_user> --epo-password "<epo_password>" --cluster-name <cluster_name> --mode airgap
+& "C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace edrf-tests --cluster-name <cluster_name> --mode airgap --image-repo image-registry.openshift-image-registry.svc:5000/edrf-tests/trellix-edrf --image-digest sha256:<digest>
 ```
 **Linux/Mac or Git Bash:**
 ```bash
-./deploy.sh --namespace edrf-tests --epo-ip <epo_ip> --epo-user <epo_user> --epo-password '<epo_password>' --cluster-name <cluster_name> --mode airgap
+./deploy.sh \
+  --namespace edrf-tests \
+  --cluster-name <cluster_name> \
+  --mode airgap \
+  --image-repo image-registry.openshift-image-registry.svc:5000/edrf-tests/trellix-edrf \
+  --image-digest sha256:<digest>
 ```
+
+**Expected:** `==> Mode: airgap`, a reminder of the push commands (informational only), then
+`STATUS: deployed` and `==> Deployment complete`. No `--image-pull-secret` is needed, because
+pods in a namespace can pull images pushed to that namespace in the internal registry.
 
 ---
 
-## Part H (jumpbox) — Verify the deployment
+## Part I (jumpbox) — Verify the deployment
 
-### H1. Wait for the rollout to finish
+### I1. Wait for the rollout to finish
 
 ```
 oc rollout status ds/edrf-xclient-container-security -n edrf-tests
@@ -857,7 +1108,7 @@ each old pod is given up to **8 minutes (480 seconds)** to stop the agent gracef
 in `Terminating` for several minutes is normal. Don't force-delete it unless it's been stuck
 for more than about 10 minutes.
 
-### H2. Check pods and the release
+### I2. Check pods and the release
 
 ```
 helm list -n edrf-tests
@@ -874,7 +1125,16 @@ To watch pods change live, add `-w` (press Ctrl+C to stop):
 oc get pods -n edrf-tests -o wide -w
 ```
 
-### H3. Check the agent logs
+### I3. Confirm `coninfo.xml` reached the pod
+
+```
+oc exec -n edrf-tests <pod-name> -- ls -l /var/McAfee/agent/coninfo.xml
+```
+
+**Expected:** the file is listed, with a size matching the `coninfo.xml size` that
+`extract-coninfo.sh` printed.
+
+### I4. Check the agent logs
 
 ```
 oc logs -n edrf-tests <pod-name>
@@ -884,26 +1144,26 @@ Or for all pods at once:
 oc logs -n edrf-tests -l name=edrf-xclient-container-security --tail=100
 ```
 
-**Expected:** the McAfee Agent provisions against ePO, then MA and XClient start, with no
-repeating errors. `Running` on its own only means the container started, not that the agent
-is reporting.
+**Expected:** the McAfee Agent provisions against ePO using `coninfo.xml`, then MA and XClient
+start, with no repeating errors. `Running` on its own only means the container started, not
+that the agent is reporting.
 
-### H4. Confirm in ePO
+### I5. Confirm in ePO
 
 Check that every worker node appears in the ePO console with a recent last-communication time.
 
-### H5. Recheck restarts after about an hour
+### I6. Recheck restarts after about an hour
 
 ```
 oc get pods -n edrf-tests
 ```
 
 `RESTARTS` should still be `0`. If it's climbing, the agent is crashing and Kubernetes is
-restarting it, even though the pod looks `Running` most of the time. See Part J.
+restarting it, even though the pod looks `Running` most of the time. See Part K.
 
 ---
 
-## Part I (jumpbox) — Collect agent logs from a pod
+## Part J (jumpbox) — Collect agent logs from a pod
 
 Use this when the dev or support team asks for agent logs.
 
@@ -916,8 +1176,10 @@ oc exec -it -n edrf-tests <pod-name> -- /bin/bash
 **2. Inside the pod, find the logs and check the agent process:**
 ```bash
 ps -o pid,ppid,cmd -C xclient
+ls -l /var/McAfee/agent/coninfo.xml
 ls -lrth /tmp
 ls -lrth /var/lib/Trellix/XClient/
+ls -lrth /var/McAfee/agent/logs/
 exit
 ```
 
@@ -943,48 +1205,93 @@ ls -lrth /mnt/XClientLogs/
 
 ---
 
-## Part J (jumpbox) — Troubleshooting
+## Part K (jumpbox) — Troubleshooting
+
+### K1. Running the scripts
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `'.' is not recognized as an internal or external command` | `./deploy.sh` was typed directly in `cmd.exe` or PowerShell | Run it through Git Bash (Part G1). Install Git for Windows first if needed (Part A3). |
-| `'--namespace' is not recognized...` (one error per line) | A multi-line command with `\` continuation was pasted into `cmd.exe` | Use the one-line `cmd.exe` form in Part G1 |
+| `'.' is not recognized as an internal or external command` | `./deploy.sh` was typed directly in `cmd.exe` or PowerShell | Run it through Git Bash (Part H1). Install Git for Windows first if needed (Part A3). |
+| `'--namespace' is not recognized...` (one error per line) | A multi-line command with `\` continuation was pasted into `cmd.exe` | Use the one-line `cmd.exe` form |
 | `The system cannot find the path specified` for `bash.exe` | Git for Windows isn't installed, or is installed somewhere else | Part A3: install it, or find the real path with `where.exe git` |
-| `oc: command not found` or `helm: command not found` from inside `deploy.sh` | bash can't see your Windows tools. Common causes are using WSL (plain `bash`) instead of Git Bash, or `oc`/`helm` not on the Windows PATH | Call Git Bash by its full path (Part A3); confirm `where.exe oc` and `where.exe helm` work in a new window (Parts A1–A2) |
+| `oc: command not found` or `helm: command not found` from inside `deploy.sh` | bash can't see your Windows tools. Common causes are using WSL (plain `bash`) instead of Git Bash, or `oc`/`helm` not on the Windows PATH | Call Git Bash by its full path (Part A3); confirm `where.exe oc` and `where.exe helm` work in a new window |
 | `deploy.sh` fails with `Unauthorized` / `You must be logged in` | Login expired, or `KUBECONFIG` wasn't inherited by Git Bash | Re-run `oc whoami` in the same window, then launch `deploy.sh` from that window (Part B1 note) |
+
+### K2. `extract-coninfo.sh` errors
+
+| Error | Cause | Action |
+|---|---|---|
+| `File not found: TrellixSmartInstall.sh` | The SmartInstaller isn't in the current folder, or has a different name | `dir` / `ls` to check; pass the actual filename or path |
+| `'bootstrap_size' not found - is this a Trellix SmartInstaller?` or `Marker '__ARCHIVE_FOLLOWS__' not found` | Not the **Linux** SmartInstaller, or the file was corrupted (for example, opened and saved in an editor, or downloaded as an HTML error page) | Download the Linux SmartInstaller again (Part B4) and copy it as a file |
+| `bootstrap_size is 0`, `Payload is empty`, `Extracted coninfo.xml is empty`, or `not valid XML` | Truncated or corrupted download | Download it again |
+| `Required tools not found: ...` | Run with a shell that lacks `awk`, `dd`, `base64`, etc. | On Windows, use Git Bash by full path (Part A3) |
+| `Not enough disk space` | Less free space than twice the SmartInstaller's size | Free space or run from a folder on another drive |
+| `exceeds the 1 MB Kubernetes Secret limit` | Unusually large `coninfo.xml` | Contact the dev team |
+| `namespace argument is required` | Only one argument was given | Run `extract-coninfo.sh TrellixSmartInstall.sh <namespace>` |
+
+### K3. `deploy.sh` errors
+
+| Error | Cause | Action |
+|---|---|---|
+| `ERROR: Secret 'epo-coninfo' not found in namespace '<ns>'` | Part E not done, done in a different namespace, or the namespace name is misspelled | Do Part E with the same namespace, then rerun |
+| `ERROR: Unknown option: --epo-ip` (or `--epo-user`, `--epo-password`) | Old command from build 144 or earlier | Remove all `--epo-*` flags. ePO details now come from `epo-coninfo` (Part E). |
+| `ERROR: --image-repo is required in registry mode` (or `--image-digest`, `--image-pull-secret`, `--namespace`, `--cluster-name`) | A flag is missing or misspelled | Check against the table in Part H |
+| `ERROR: edrf-xclient chart directory not found in bundle` | `deploy.sh` was moved away from the `edrf-xclient/` folder | Keep the extracted bundle together |
 | `forbidden` mentioning `securitycontextconstraints` or `clusterroles` | Your account can't create cluster-wide resources | Part B2: a cluster-admin grants access or runs `deploy.sh` |
-| `execution error ... is required` | A required value is missing or misspelled | Check every `deploy.sh` flag; run the Part F dry-run to see which value |
-| `namespace "<ns>" not found` when creating a secret | The namespace doesn't exist yet | Part D, then re-run the secret command and verify with `oc get secret -n <ns>` |
-| `ImagePullBackOff` with `Authentication is required` or `Unable to retrieve some image pull secrets` | The pull secret is missing, in the wrong namespace, or has the Token ID instead of the Reference Token | Fix it (Parts B3, E), then force a retry: `oc delete pod -n edrf-tests -l name=edrf-xclient-container-security` |
-| `ImagePullBackOff` with a timeout or `no route to host` | The worker nodes can't reach Artifactory | Use airgap mode (Part G2), or ask the network team to open access |
-| Pods not created at all, or the DaemonSet events mention `unable to validate against any security context constraint` | The ServiceAccount isn't allowed to use the custom SCC | Check `oc get scc edrf-xclient-edrf-tests` and `oc get rolebinding -n edrf-tests`. If missing, re-run `deploy.sh` with sufficient permissions (Part B2). |
+| `execution error ... is required` | A required chart value is empty | Run the Part G dry-run to see which value |
+
+### K4. Pods after deployment
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `InvalidImageName` | The digest contains placeholder text (`sha256:<digest>`) or a typo | Get the real digest (Part C or H2.2) and rerun `deploy.sh` |
+| `ImagePullBackOff` with `manifest unknown` / `not found` | The digest is from a different build, or the repository path is wrong | Get the digest from the correct build folder (Part C) |
+| `ImagePullBackOff` with `Authentication is required` or `Unable to retrieve some image pull secrets` | The pull secret is missing, in the wrong namespace, or has the Token ID instead of the Reference Token | Fix it (Parts B3, F), then force a retry: `oc delete pod -n edrf-tests -l name=edrf-xclient-container-security` |
+| `ImagePullBackOff` with a timeout or `no route to host` | The worker nodes can't reach Artifactory | Use airgap mode (Part H2), or ask the network team to open access |
+| `ContainerCreating` for a long time; `oc describe pod` shows `secret "epo-coninfo" not found` | The secret was deleted or created in another namespace | Re-run `oc apply -f epo-coninfo.yml` (Part E3), then `oc delete pod -n edrf-tests <pod-name>` |
+| Pods not created at all, or DaemonSet events mention `unable to validate against any security context constraint` | The ServiceAccount isn't allowed to use the custom SCC | Check `oc get scc edrf-xclient-edrf-tests` and `oc get rolebinding -n edrf-tests`. If missing, re-run `deploy.sh` with sufficient permissions (Part B2). |
 | Old pod stuck in `Terminating` | Normal for up to 8 minutes (graceful agent stop) | Wait. Only if it's still there after about 10 minutes, run `oc delete pod -n edrf-tests <pod-name> --force --grace-period=0` |
 | Pod `Running` but `RESTARTS` keeps increasing | The agent is crashing and being restarted | `oc describe pod -n edrf-tests <pod-name>`: under **Last State**, `Reason: OOMKilled` means it hit the 4Gi memory limit, and `Error` with an exit code means the agent died. Get its last output with `oc logs -n edrf-tests <pod-name> --previous` and send both to the dev team. |
-| `CrashLoopBackOff`, logs mention ePO connection failures | Wrong ePO IP, user, or password, or the node can't reach ePO | Re-check Part B4 values; test reachability from the node with `oc debug node/<node-name>` (pods use `hostNetwork: true`) |
-| Pod `Running`, but not visible in the ePO console | Wrong ePO credentials, ePO unreachable from the node, or the agent is waiting for approval in ePO | Check `oc logs`; ask your ePO admin to check the pending or unmanaged systems list |
-| `error: one of src or dest must be a local file specification` from `oc cp` | A Windows destination path starting with a drive letter (`C:\...`) | `cd` to the destination folder and use `./<file>` (Part I) |
+| Pod `Running`, but not visible in the ePO console | `coninfo.xml` from the wrong ePO server, provisioning failed, ePO unreachable from the node, or the agent is waiting for approval in ePO | Check I3 and I4. Confirm the SmartInstaller came from the right ePO. Test reachability from the node with `oc debug node/<node-name>` (pods use `hostNetwork: true`). Ask your ePO admin to check the pending or unmanaged systems list. |
+| `error: one of src or dest must be a local file specification` from `oc cp` | A Windows destination path starting with a drive letter (`C:\...`) | `cd` to the destination folder and use `./<file>` (Part J) |
 
 For anything not covered above, `oc describe pod <pod-name> -n edrf-tests` and
 `oc logs <pod-name> -n edrf-tests` usually show the cause directly.
 
 ---
 
-## Part K (jumpbox) — Upgrading to a new build
+## Part L (jumpbox) — Upgrading to a new build
 
 An upgrade is the same process as an install:
 
 1. Get the new bundle and extract it into a **new** folder (Part B5).
-2. Registry mode: get the new digest (Part C). The pull secret from Part E is reused, so don't
-   recreate it.
-3. Optionally dry-run with the new digest (Part F).
-4. Run the same `deploy.sh` command (Part G) with the new `--image-digest`.
-5. Verify (Part H). Expect the rollout to take 20–25 minutes.
+2. Registry mode: get the **new** digest (Part C). The pull secret from Part F is reused, so
+   don't recreate it. Airgap mode: push the new `image.tar` and capture its digest (Part H2.2).
+3. The `epo-coninfo` secret (Part E) is reused. `deploy.sh` only checks that it exists.
+   Recreate it only if the agents must report to a different ePO server, or the ePO server's
+   certificates changed. In that case, download a fresh SmartInstaller and redo Part E.
+   `oc apply` updates the existing secret, then restart the pods with
+   `oc rollout restart ds/edrf-xclient-container-security -n edrf-tests`.
+4. Optionally dry-run with the new digest (Part G).
+5. Run `deploy.sh` (Part H) with the new `--image-digest`.
+6. Verify (Part I). Expect the rollout to take 20–25 minutes.
 
 `deploy.sh` upgrades the existing `edrf-xclient` release in place and creates a new revision.
 
+### Upgrading from build 50.99.0.144 or earlier
+
+Older builds took ePO details as `deploy.sh` flags and stored them in an `epo-details`
+ConfigMap and Secret. When moving to 50.99.0.150 or later:
+
+1. **Before** running the new `deploy.sh`, create the `epo-coninfo` secret (Part E). The
+   new `deploy.sh` refuses to run without it.
+2. Drop `--epo-ip`, `--epo-user`, and `--epo-password` from your command.
+3. The upgrade automatically removes the old `epo-details` ConfigMap and Secret, which held
+   the ePO password. That's expected.
+
 ---
 
-## Part L (jumpbox) — Rolling back
+## Part M (jumpbox) — Rolling back
 
 ```
 helm history edrf-xclient -n edrf-tests
@@ -993,24 +1300,29 @@ Find the last good revision, then:
 ```
 helm rollback edrf-xclient <revision-number> -n edrf-tests
 ```
-Then verify as in Part H.
+Then verify as in Part I.
+
+**Note:** rolling back from 50.99.0.150 or later to 50.99.0.144 or earlier brings back the old
+ePO settings stored in that revision. The `epo-coninfo` secret isn't touched by a rollback.
 
 ---
 
-## Part M (jumpbox) — Uninstalling
+## Part N (jumpbox) — Uninstalling
 
 ```
 helm uninstall edrf-xclient -n edrf-tests
 ```
 
 This removes everything the chart created: the DaemonSet, ServiceAccount, custom SCC,
-ClusterRole, RoleBinding, ConfigMap, and Secret. It does **not** remove the namespace, the pull
-secret you created in Part E, or agent data on the nodes:
+ClusterRole, and RoleBinding. It does **not** remove what you created by hand, the namespace,
+or agent data on the nodes:
 
 ```
+oc delete secret epo-coninfo -n edrf-tests
 oc delete secret artifactory-pull-secret -n edrf-tests
 oc delete namespace edrf-tests
 ```
+(Deleting the namespace also deletes both secrets.)
 
 Agent data persists on each node under `/mnt/XClientLogs/`. Remove it only if you want a
 completely clean node (via `oc debug node/<node-name>`, then `chroot /host`). Don't do this
@@ -1025,16 +1337,19 @@ oc whoami                                   # who you're logged in as
 oc get nodes                                # cluster nodes and status
 oc get projects                             # projects you can see
 oc get ns edrf-tests                        # does the namespace exist
+oc get secret epo-coninfo -n edrf-tests     # ePO connection secret
+oc get secret artifactory-pull-secret -n edrf-tests
 oc get pods -n edrf-tests -o wide           # pods, nodes, restarts
 oc get pods -n edrf-tests -o wide -w        # watch live (Ctrl+C to stop)
 oc describe pod -n edrf-tests <pod-name>    # events and last state
 oc logs -n edrf-tests <pod-name>            # agent logs
 oc logs -n edrf-tests <pod-name> --previous # logs from before the last restart
+oc exec -n edrf-tests <pod-name> -- ls -l /var/McAfee/agent/coninfo.xml
 oc rollout status ds/edrf-xclient-container-security -n edrf-tests
 helm list -n edrf-tests                     # release status and revision
-helm history edrf-xclient -n edrf-tests     # revision history
-helm get values edrf-xclient -n edrf-tests --all   # values in use (includes ePO password)
 helm status edrf-xclient -n edrf-tests      # release status summary
+helm history edrf-xclient -n edrf-tests     # revision history
+helm get values edrf-xclient -n edrf-tests --all   # values in use
 ```
 
 ---
@@ -1042,19 +1357,20 @@ helm status edrf-xclient -n edrf-tests      # release status summary
 ## Appendix A — Chart values reference
 
 `deploy.sh` sets these for you from its flags. They're listed here for anyone running Helm
-directly (Appendix B) or reviewing `values.yaml`.
+directly (Appendix B) or reviewing `values.yaml`. **There are no ePO values in the chart.**
+ePO details come only from the `epo-coninfo` secret.
 
 | Field | Required | `deploy.sh` flag | Description |
 |---|---|---|---|
-| `epo.ip` | Yes | `--epo-ip` | IP address or hostname of the ePO server |
-| `epo.user` | Yes | `--epo-user` | ePO admin username |
-| `epo.password` | Yes* | `--epo-password` | ePO admin password. *Not required if `epo.existingSecret` is set. |
-| `epo.existingSecret` | No | none | Name of an existing secret holding the ePO password (key `epo-passwd`), used in place of `epo.password` |
 | `image.repository` | Yes | `--image-repo` | Full image registry path |
 | `image.digest` | Yes | `--image-digest` | SHA256 digest of the image |
-| `imagePullSecret` | No | `--image-pull-secret` | Name of the pull secret. Required in registry mode. Leave empty (`""`) in airgap mode: the DaemonSet then omits `imagePullSecrets`, and OpenShift trusts images in its own internal registry. |
+| `image.pullPolicy` | No | none (default `IfNotPresent`) | Kubernetes image pull policy |
+| `imagePullSecret` | No | `--image-pull-secret` | Name of the pull secret. Required in registry mode for a private registry. Leave empty (`""`) in airgap mode: the DaemonSet then omits `imagePullSecrets`. |
 | `deploymentDetails.clusterName` | Yes | `--cluster-name` | Name identifying this cluster in ePO and telemetry |
-| `deploymentDetails.deploymentMode` | Yes | none (defaults to `Trellix Managed`) | How the deployment is managed |
+| `deploymentDetails.deploymentMode` | Yes | none (default `Trellix Managed`) | How the deployment is managed |
+| `serviceAccount.name` | No | none (default `edrf-admin`) | ServiceAccount the pods run as |
+| `securityContext.capabilities` | No | none | Linux capabilities added to the container, and allowed by the custom SCC |
+| `resources` | No | none (default requests 2Gi / 500m, limits 4Gi / 1000m) | Pod CPU and memory |
 
 Required fields use Helm's `required` function, so an install or upgrade fails immediately if
 any of them is empty.
@@ -1063,19 +1379,20 @@ any of them is empty.
 
 ## Appendix B — Installing with Helm directly (without `deploy.sh`)
 
-Use this only if you can't run `deploy.sh` (for example, no bash available) and you're in
-registry mode. Run it from the bundle folder after Parts A–F, as a single line:
+Use this only if you can't run `deploy.sh` (for example, no bash available). You still need the
+namespace (Part D), the `epo-coninfo` secret (Part E), and in registry mode the pull secret
+(Part F). Run it from the bundle folder, as a single line:
 
 ```
-helm upgrade --install edrf-xclient ./edrf-xclient -n edrf-tests --create-namespace --set epo.ip="<epo_ip>" --set epo.user="<epo_user>" --set epo.password="<epo_password>" --set deploymentDetails.clusterName="<cluster_name>" --set image.repository="<image_repo>" --set image.digest="sha256:<digest>" --set imagePullSecret="artifactory-pull-secret"
+helm upgrade --install edrf-xclient ./edrf-xclient -n edrf-tests --create-namespace --set image.repository="<image_repo>" --set image.digest="sha256:<digest>" --set imagePullSecret="artifactory-pull-secret" --set deploymentDetails.clusterName="<cluster_name>"
 ```
 
-Passing the ePO password with `--set` at install time, instead of saving it in
-`values.yaml`, keeps it out of files that might end up in git. Verify as in Part H.
+Unlike `deploy.sh`, Helm doesn't check for the `epo-coninfo` secret. If it's missing, the
+install succeeds but the pods stay in `ContainerCreating`. Verify as in Part I.
 
 ---
 
-## Appendix C — Container image and runtime internals
+## Appendix C — Container image, ePO provisioning, and runtime internals
 
 Background for troubleshooting with the dev team. You don't need this to deploy.
 
@@ -1084,11 +1401,24 @@ Background for troubleshooting with the dev team. You don't need this to deploy.
   (`artifactory.trellix.com/rapidfort/rfcurated/ubi:ubi10-minimal-fips-rfcurated`), a hardened,
   low-CVE base.
 - **Contents:** `tini`, runtime dependencies, the McAfee Agent (MA) and XClient RPMs, DXL (Data
-  Exchange Layer, installed from the TA package bundle), and `entrypoint.sh`, the in-container
-  supervisor.
+  Exchange Layer, installed from the TA package bundle: `contrib.ini`, `DXL.zip`,
+  `docker-install-dxl.sh`), and `entrypoint.sh`, the in-container supervisor.
 - **Built by:** the Orbit pipeline `orbit/ContainerSecurity_ImageBuild.groovy` (build context
   `rhel10/`). The customer bundle is produced by a separate, manually triggered pipeline,
   `orbit/ContainerSecurity_BundlePackage.groovy`.
+
+**How ePO provisioning works:**
+1. The ePO Linux SmartInstaller (`TrellixSmartInstall.sh`) is a shell script with an archive
+   appended after a `__ARCHIVE_FOLLOWS__` marker. The archive contains a bootstrap package
+   followed by `coninfo.xml`.
+2. `extract-coninfo.sh` reads `bootstrap_size` from the installer, skips past the bootstrap
+   package, extracts `coninfo.xml`, checks it's XML and under the 1 MB Secret limit, and writes
+   it base64-encoded into `epo-coninfo.yml`, a Secret named `epo-coninfo` with the key
+   `coninfo.xml`.
+3. The DaemonSet mounts that key into every pod, read-only, at
+   `/var/McAfee/agent/coninfo.xml`.
+4. At startup, the container's `provision-container.sh` reads it and provisions the McAfee
+   Agent against ePO.
 
 **Run model.** `tini` is the container's init process and supervises `entrypoint.sh`, which:
 1. provisions the McAfee Agent (MA/TA) against ePO,
@@ -1097,7 +1427,7 @@ Background for troubleshooting with the dev team. You don't need this to deploy.
 4. on `SIGTERM`, stops XClient and then MA gracefully before the container exits.
 
 Step 3 is why a crashing agent shows up as a climbing `RESTARTS` count rather than a pod that
-stays down (Part H5).
+stays down (Part I6).
 
 **DaemonSet design:**
 - **Linux nodes only:** `nodeSelector: kubernetes.io/os: linux`. The workload needs eBPF, the
@@ -1105,7 +1435,9 @@ stays down (Part H5).
 - **Security context:** runs as `runAsUser: 0` but **not privileged** (`privileged: false`).
   All Linux capabilities are dropped, then only the ones the eBPF sensor needs are added back
   (`SYS_ADMIN`, `BPF`, `PERFMON`, `SYS_RESOURCE`, `NET_ADMIN`, and others listed in
-  `values.yaml`). The same list feeds the chart's custom SCC, so the two always match.
+  `values.yaml`). The same list feeds the chart's custom SCC, so the two always match. (The
+  product README still describes privileged containers and the built-in `privileged` SCC.
+  The chart itself uses this reduced-privilege setup.)
 - **`hostNetwork: true`:** the pod shares the node's network stack. That's why ePO
   reachability has to be tested from the node (`oc debug node/<node-name>`).
 - **`hostPID: true`:** the pod shares the host's process namespace, giving XClient host-level
@@ -1134,17 +1466,21 @@ stays down (Part H5).
 This guide targets OpenShift. For other platforms:
 
 **Kubernetes 1.23+ without Helm:** use `02-create-sa-k8s.yml` from the product source, which
-applies the required Pod Security Admission (PSA) labels in place of an SCC.
+applies the required Pod Security Admission (PSA) labels in place of an SCC. The
+`epo-coninfo` secret is still required. `extract-coninfo.sh` and `kubectl apply -f
+epo-coninfo.yml` work the same way.
 
 **Local testing on minikube:** use `edrf-xclient-minikube.yml`, a single flattened manifest
 (namespace, ServiceAccount, ConfigMap, Secret, DaemonSet) from the product source:
 ```bash
 minikube start --container-runtime=cri-o   # the DaemonSet mounts the CRI-O socket
 minikube image load <image_name:tag>       # no pull secret is used
-# edit the <epo_ip>/<epo_username>/<epo_password> and <image_name:tag> placeholders first
+# edit the placeholders in the manifest (ePO details and <image_name:tag>) first
 # CLUSTER_NAME and DEPLOYMENT_MODE are hardcoded in the manifest; edit them if needed
 kubectl apply -f edrf-xclient-minikube.yml
 ```
+The product README's minikube manifest still uses ePO IP/user/password placeholders. Check
+with the dev team whether it has been updated for the `coninfo.xml` method.
 
 > **minikube only: mount the BPF filesystem first.** XClient pins its eBPF maps under
 > `/sys/fs/bpf`, which must be a mounted BPF filesystem. Real cluster nodes mount it
