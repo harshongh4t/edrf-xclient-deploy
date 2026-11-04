@@ -1,26 +1,36 @@
 # eDRF XClient — OpenShift Deployment Guide
 
-**Audience:** engineers deploying this chart for the first time. No prior assumption that
-`oc`, `helm`, or Artifactory access is already set up. Follow the parts in order — later
-steps depend on resources earlier steps create.
+**Audience:** engineers deploying eDRF XClient for the first time. This guide doesn't assume
+`oc`, `helm`, Git Bash, or Artifactory access are already set up. Follow the parts in order,
+because later steps depend on resources that earlier steps create.
+
+**How deployment works now:** you receive a **bundle** (`edrf-xclient-bundle-<version>.tar.gz`)
+containing the container image, the Helm chart, and a script, `deploy.sh`. **`deploy.sh` does
+the install.** It runs `helm upgrade --install` for you, so the same command handles both a
+fresh install and an upgrade of an existing release. Don't run `helm install` yourself.
 
 This guide covers three shells: **PowerShell**, **Command Prompt (`cmd.exe`)**, and
 **Linux/Mac (bash/zsh)**.
 
-- Every `oc` and `helm` command is plain text that runs identically in all three shells —
-  shown once, with no shell label.
-- A small number of steps genuinely differ by shell — setting an environment variable,
-  extracting an archive, editing PATH. These appear as three labeled blocks: **PowerShell**,
-  **cmd.exe**, **Linux/Mac**. Use the one matching your terminal.
-- Chart paths are written as `./edrf-xclient` (forward slash) throughout — this resolves
-  correctly in all three shells.
-- One shell-specific quirk: PowerShell aliases `curl` to `Invoke-WebRequest`. Use `curl.exe`
-  explicitly in PowerShell wherever `curl` appears below (called out again in Part C).
+- Every `oc` and `helm` command is plain text that runs the same in all three shells, so it
+  appears once with no shell label.
+- A few steps really do differ by shell (setting an environment variable, extracting an
+  archive, editing PATH, running `deploy.sh`). These appear as labeled blocks: **PowerShell**,
+  **cmd.exe**, **Linux/Mac**. Use the one that matches your terminal.
+- **`deploy.sh` is a bash script.** It doesn't run directly in `cmd.exe` or PowerShell. On
+  Windows you need **Git for Windows**, which provides Git Bash (Part A3). Linux and Mac
+  already have bash.
+- PowerShell aliases `curl` to `Invoke-WebRequest`, so use `curl.exe` wherever `curl` appears
+  below in PowerShell.
 
-**Read Part 0 first** — it determines which machine you run the rest of this guide from.
+**Read Part 0 first.** It determines which machine you run the rest of this guide from, and
+which deployment mode to use.
 
-> **Namespace note:** examples below use `edrf-tests`, a placeholder. This name is expected
-> to change in a future release — use whatever namespace your team has standardized on.
+> **Namespace note:** the examples below use `edrf-tests` as a placeholder. This name is
+> expected to change in a future release. Use whatever namespace your team has standardized on.
+
+> **Credentials note:** never commit real passwords, tokens, or a `values.yaml` containing
+> them to any git repository.
 
 ---
 
@@ -28,30 +38,35 @@ This guide covers three shells: **PowerShell**, **Command Prompt (`cmd.exe`)**, 
 
 | Term | What it means here |
 |---|---|
-| **OpenShift / `oc`** | Red Hat's Kubernetes distribution; `oc` is its CLI (a superset of `kubectl`). |
-| **Project / Namespace** | An isolated area in the cluster. "Project" is OpenShift's name for a Kubernetes Namespace — same thing. |
-| **Helm / chart / release** | Helm is a package manager for Kubernetes. A **chart** is the package (`edrf-xclient.zip`). A **release** is one installed instance of that chart in a namespace (named `edrf-xclient` below). |
-| **DaemonSet** | A workload that runs exactly one pod on every node — how the chart deploys the XClient agent. |
+| **OpenShift / `oc`** | Red Hat's Kubernetes distribution. `oc` is its CLI (a superset of `kubectl`). |
+| **Project / Namespace** | An isolated area in the cluster. "Project" is OpenShift's name for a Kubernetes Namespace. |
+| **Helm / chart / release** | Helm is a package manager for Kubernetes. A **chart** is the package (the `edrf-xclient/` folder in the bundle). A **release** is one installed instance of that chart in a namespace (named `edrf-xclient`). |
+| **Bundle** | `edrf-xclient-bundle-<version>.tar.gz`, the deliverable containing `image.tar`, the `edrf-xclient/` chart, and `deploy.sh`. |
+| **`deploy.sh`** | The bash script in the bundle that performs the install or upgrade. |
+| **Git Bash** | A bash shell for Windows, installed with Git for Windows. Required on Windows to run `deploy.sh`. |
+| **DaemonSet** | A workload that runs exactly one pod on every node. This is how the chart deploys the XClient agent. |
 | **Secret / ConfigMap** | Kubernetes objects for sensitive values (Secret) and non-sensitive config (ConfigMap). |
-| **ServiceAccount (SA)** | The identity a pod runs as; here it's granted the privileged permissions the agent needs. |
-| **SCC** | Security Context Constraint — OpenShift's permission gate for privileged containers. This chart requires the `privileged` SCC. |
+| **ServiceAccount (SA)** | The identity a pod runs as (`edrf-admin` here). |
+| **SCC** | Security Context Constraint, OpenShift's permission gate for pods that need host access. This chart **creates its own reduced-privilege SCC** (`edrf-xclient-<namespace>`) instead of using the built-in `privileged` SCC. Creating an SCC needs cluster-level permission (Part B2). |
 | **Artifactory** | Trellix's private container registry (`artifactory.trellix.com`), where the agent image is hosted. |
-| **ePO** | Trellix ePolicy Orchestrator — the management server the XClient agent reports to. |
+| **ePO** | Trellix ePolicy Orchestrator, the management server the XClient agent reports to. |
 
 ---
 
-## Part 0 — Determine which machine does what
+## Part 0 — Choose your machine and deployment mode
+
+### 0.1 Which machine does what
 
 This deployment touches two networks, and many corporate environments don't let one machine
 reach both:
 
-1. The **OpenShift cluster API** — needed for every `oc` and `helm` command (Parts A, B, D–M).
-2. **Artifactory**, on the general corporate network — needed only for Part C (image digest
-   lookup).
+1. The **OpenShift cluster API**, needed for every `oc`, `helm`, and `deploy.sh` command.
+2. **Artifactory**, on the general corporate network. You only need this for Part C (image
+   digest lookup) in registry mode.
 
 A locked-down **jumpbox** dedicated to cluster administration often has no route to the
-general internet. An everyday workstation typically has internet/Artifactory access but no
-path to the OpenShift API. Confirm which situation applies before proceeding.
+general internet. An everyday workstation usually has Artifactory access but no path to the
+OpenShift API.
 
 **Run this once, from your jumpbox:**
 ```
@@ -59,26 +74,42 @@ curl -v --max-time 10 https://artifactory.trellix.com
 ```
 (PowerShell: `curl.exe` instead of `curl`.)
 
-- **Fast response** (even an error page, as long as it's not a hang) → the jumpbox has
-  internet access. Run every part of this guide, including Part C, from the jumpbox.
-- **Hangs until timeout** → split the work:
-  - **Part C only** (resolving `image.repository` / `image.digest`) — run from your everyday
-    workstation. Only `curl` and your Artifactory credentials (Part B3) are needed there.
-  - **Everything else (Parts A, B, D–M)** — stays on the jumpbox, the only machine that can
-    reach the OpenShift API.
-  - The only values that need to move between machines are the two short strings Part C
-    produces (`image.repository`, `image.digest`) — paste them into the `helm install`
-    command in Part G.
+- **Fast response** (even an error page, as long as it doesn't hang) means the jumpbox has
+  internet access. Run every part of this guide from the jumpbox.
+- **Hangs until timeout** means you split the work:
+  - **Part C only** (looking up the image repository and digest): run it from your workstation.
+    You only need `curl` and your Artifactory credentials (Part B3) there.
+  - **Everything else** stays on the jumpbox.
+  - The only values to carry between machines are the two short strings Part C produces
+    (image repository and digest).
 
-Every part below is tagged **(jumpbox)**, **(any machine)**, or
-**(Artifactory-reachable machine)**.
+### 0.2 Which deployment mode
+
+`deploy.sh` supports two modes:
+
+| Mode | Use when | You must provide |
+|---|---|---|
+| **Registry** (default) | The cluster's worker nodes can pull images from Artifactory (or an internal mirror) | A pull secret (Part E), plus the image repository and digest (Part C) |
+| **Airgap** | The cluster can't reach any external registry | Docker on the jumpbox, plus a one-time registry route change by a cluster-admin (Part G2). No pull secret, repository, or digest. |
+
+If you aren't sure, start with **registry mode**. If pods later fail with `ImagePullBackOff`
+and a network timeout (not an authentication error), the nodes can't reach Artifactory and you
+need airgap mode.
+
+Every part below is tagged **(jumpbox)**, **(any machine)**, **(Artifactory-reachable
+machine)**, **(registry mode)**, or **(airgap mode)**.
 
 ---
 
 ## Part A (jumpbox) — Install the tools
 
-You need the `oc` CLI, the `helm` CLI, and `curl` (built into Windows 10+, Linux, and Mac —
-nothing to install).
+| Tool | Needed for | Windows | Linux/Mac |
+|---|---|---|---|
+| `oc` | Everything | Install (A1) | Install (A1) |
+| `helm` (v3) | `deploy.sh` calls it internally, plus the dry-run | Install (A2) | Install (A2) |
+| Git for Windows (Git Bash) | Running `deploy.sh` | **Install (A3)** | Not needed (bash is built in) |
+| `curl`, `tar` | Digest lookup, extracting the bundle | Built into Windows 10/11 | Built in |
+| Docker CLI | **Airgap mode only** | Install (A4) | Install (A4) |
 
 ### A1. Install the `oc` CLI
 
@@ -88,7 +119,7 @@ nothing to install).
 3. Download the **oc** CLI for your OS.
 
 **Option 2 — from the official mirror:**
-https://mirror.openshift.com/pub/openshift-v4/clients/oc/latest/ — separate subfolders for
+https://mirror.openshift.com/pub/openshift-v4/clients/oc/latest/ has separate subfolders for
 Windows (`.zip`), Linux (`.tar.gz`), and Mac (`.tar.gz`).
 
 **Extract the archive:**
@@ -97,8 +128,8 @@ Windows (`.zip`), Linux (`.tar.gz`), and Mac (`.tar.gz`).
 ```powershell
 Expand-Archive -Path "$env:USERPROFILE\Downloads\oc.zip" -DestinationPath "$env:USERPROFILE\Downloads\oc-extracted"
 ```
-**cmd.exe** (Windows' built-in `tar.exe` extracts `.zip` files too — create the destination
-first, since `tar -C` requires it to already exist):
+**cmd.exe** (Windows' built-in `tar.exe` also extracts `.zip` files. Create the destination
+first, because `tar -C` needs it to exist):
 ```cmd
 mkdir "%USERPROFILE%\Downloads\oc-extracted"
 tar -xf "%USERPROFILE%\Downloads\oc.zip" -C "%USERPROFILE%\Downloads\oc-extracted"
@@ -128,32 +159,18 @@ cp ~/oc-extracted/oc ~/bin/oc
 chmod +x ~/bin/oc
 ```
 
-**Confirm the binary runs before touching PATH:**
-
-**Windows (PowerShell or cmd.exe):**
-```
-C:\oc\oc.exe version --client
-```
-**Linux/Mac:**
-```bash
-~/bin/oc version --client
-```
-
-**Expected:** `Client Version: 4.x.x`.
-
 **Add it to PATH:**
 
-**PowerShell** (permanent; this also applies to future `cmd.exe` sessions, since it's a real
-Windows user environment variable):
+**PowerShell** (permanent, and also applies to future `cmd.exe` and Git Bash sessions):
 ```powershell
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;C:\oc", "User")
 ```
-**cmd.exe** (`setx` can truncate a very long existing PATH — prefer the PowerShell command
-above or the GUI method if your PATH is already large):
+**cmd.exe** (`setx` can truncate a very long existing PATH. If your PATH is already large, use
+the PowerShell command above or the GUI method instead):
 ```cmd
 setx PATH "%PATH%;C:\oc"
 ```
-**Windows GUI** (works regardless of your default shell):
+**Windows GUI** (works whatever your default shell is):
 1. **Win + R** → `sysdm.cpl` → Enter.
 2. **Advanced** tab → **Environment Variables**.
 3. Under **User variables**, select `Path` → **Edit** → **New**.
@@ -165,7 +182,7 @@ echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc    # or ~/.zshrc
 source ~/.bashrc
 ```
 
-Open a new terminal, then verify:
+**Open a new terminal**, then verify:
 
 **Windows:**
 ```
@@ -178,14 +195,11 @@ which oc
 oc version --client
 ```
 
-**Expected:** the path command prints the binary's location, and `oc version --client` runs
-without a full path.
+**Expected:** the path command prints the binary's location, and `oc version --client` prints
+`Client Version: 4.x.x`.
 
-*(Alternative on Windows with Chocolatey: `choco install openshift-cli`.)*
-
-**If `oc` is still not recognized** after opening a new terminal: PATH wasn't updated, or
-you're in a terminal session opened before the change. `where.exe oc` / `which oc` returning
-nothing confirms a PATH problem — redo the PATH step and open a fresh terminal.
+**If `oc` is still not recognized:** PATH wasn't updated, or the terminal was opened before
+the change. Redo the PATH step and open a fresh terminal.
 
 ### A2. Install the `helm` CLI
 
@@ -208,41 +222,86 @@ chmod +x get_helm.sh
 ./get_helm.sh
 ```
 
-**Verify:**
+**Open a new terminal**, then verify:
 ```
 helm version
 ```
 
 **Expected:** `version.BuildInfo{Version:"v3...`. This chart requires Helm 3.
 
-### A3. Nothing else to install
+### A3. Install Git for Windows (Windows only)
 
-`curl` is sufficient for the image digest lookup in Part C — Docker and `skopeo` are not
-required.
+`deploy.sh` is a bash script. Running it straight from `cmd.exe` fails with
+`'.' is not recognized as an internal or external command`. Git for Windows provides
+**Git Bash**, which runs it.
+
+**Install:**
+```
+winget install --id Git.Git -e
+```
+Or download the installer from https://git-scm.com/download/win and accept the defaults. If
+software installs are restricted on the jumpbox, request Git for Windows from IT.
+
+**Open a new terminal**, then verify:
+```
+"C:\Program Files\Git\bin\bash.exe" --version
+```
+(PowerShell: `& "C:\Program Files\Git\bin\bash.exe" --version`.)
+
+**Expected:** `GNU bash, version 5.x...`.
+
+If that path doesn't exist, Git may have been installed per-user. Find it with:
+```
+where.exe git
+```
+`bash.exe` is in the `bin` folder next to the `cmd` folder that contains `git.exe`. For
+example, `...\Git\cmd\git.exe` means bash is at `...\Git\bin\bash.exe`. Use that path wherever
+this guide shows `C:\Program Files\Git\bin\bash.exe`.
+
+> **Do not use plain `bash` on Windows.** Typing `bash` on its own usually starts **WSL**
+> (Windows Subsystem for Linux), not Git Bash. WSL can't see your Windows `oc.exe` and
+> `helm.exe` or your cluster login, so `deploy.sh` fails with `oc: command not found`. Always
+> call Git Bash by its full path, as shown above.
+
+### A4. Install the Docker CLI (airgap mode only)
+
+Skip this in registry mode. In airgap mode, `deploy.sh` uses Docker to load `image.tar` and
+push it to the cluster's internal registry.
+
+- **Windows:** Docker Desktop (https://docs.docker.com/desktop/setup/install/windows-install/),
+  or whatever your organization approves.
+- **Linux:** your distribution's `docker` package or Docker Engine.
+- **Mac:** Docker Desktop.
+
+**Verify** (the daemon must be running, not just the CLI installed):
+```
+docker version
+```
+
+**Expected:** both a `Client` and a `Server` section. If only `Client` appears, start Docker
+Desktop or the Docker service.
 
 ---
 
 ## Part B — Collect access and credentials
 
-B1, B2, and B5 run on the jumpbox; B3 and B4 only require a browser and can run from any
-machine.
+B1, B2, and B5 run on the jumpbox. B3 and B4 only need a browser and can run from any machine.
 
 ### B1 (jumpbox). OpenShift cluster login
 
-Confirm with whoever provisioned your access which method applies.
+Ask whoever provisioned your access which method applies.
 
 **Option 1 — token login:**
 1. Log in to the web console.
 2. Click your username (top-right) → **Copy login command**.
 3. In the new tab, click **Display Token**.
-4. Copy and run the resulting command:
+4. Copy and run the resulting command (the same in all three shells):
    ```
    oc login --token=sha256~xxxxxxxxxxxx --server=https://api.<your-cluster>:6443
    ```
-   Identical across all three shells.
 
-Tokens from this flow are short-lived — if `oc whoami` later fails with an auth error, repeat
-these steps for a fresh token.
+Tokens from this flow are short-lived. If `oc whoami` later fails with an auth error, repeat
+these steps to get a fresh token.
 
 **Option 2 — kubeconfig file:**
 
@@ -250,19 +309,14 @@ Some teams issue a `kubeconfig` file directly (often for a shared service accoun
 individual logins.
 
 1. Save the file somewhere stable, e.g. `C:\Users\<you>\Documents\kubeconfig`.
-2. Point `oc` at it via the `KUBECONFIG` environment variable. Setting it in one shell does
-   not make it visible in another (each is a separate session-level setting unless made
-   permanent).
+2. Point `oc` at it with the `KUBECONFIG` environment variable. A variable set in one shell
+   window isn't visible in another unless you make it permanent.
 
    **PowerShell** (current session):
    ```powershell
    $env:KUBECONFIG = "C:\Users\<you>\Documents\kubeconfig"
    ```
-   Verify:
-   ```powershell
-   echo $env:KUBECONFIG
-   ```
-   Permanent (also applies to future `cmd.exe` sessions):
+   Permanent (also applies to future `cmd.exe` and Git Bash sessions):
    ```powershell
    [Environment]::SetEnvironmentVariable("KUBECONFIG", "C:\Users\<you>\Documents\kubeconfig", "User")
    ```
@@ -271,238 +325,179 @@ individual logins.
    ```cmd
    set KUBECONFIG=C:\Users\<you>\Documents\kubeconfig
    ```
-   Verify:
-   ```cmd
-   echo %KUBECONFIG%
-   ```
-   `set` only affects the current window — make it permanent with the PowerShell command
-   above (run once, applies to future `cmd.exe` windows too) or the GUI method from A1, using
-   variable name `KUBECONFIG`.
+   `set` only affects the current window. To make it permanent, use the PowerShell command
+   above or the GUI method from A1 with the variable name `KUBECONFIG`.
 
    **Linux/Mac** (current session):
    ```bash
    export KUBECONFIG=/home/<you>/kubeconfig
-   ```
-   Verify:
-   ```bash
-   echo $KUBECONFIG
    ```
    Permanent:
    ```bash
    echo 'export KUBECONFIG=/home/<you>/kubeconfig' >> ~/.bashrc    # or ~/.zshrc
    ```
 
-**Verify login (either option, identical in every shell):**
+> **Windows and `deploy.sh`:** run `deploy.sh` from the **same** `cmd.exe` or PowerShell
+> window where you logged in or set `KUBECONFIG` (Part G1 shows how). Git Bash launched from
+> that window inherits your PATH and login. A Git Bash window opened separately from the
+> Start menu won't have a `KUBECONFIG` set with `set` or `$env:` unless you made it permanent.
+
+**Verify login (either option, the same in every shell):**
 ```
 oc whoami
-```
-
-**Expected:** your identity for token login, or the account baked into the kubeconfig (e.g.
-`system:admin`).
-
-Confirm the cluster itself is reachable:
-```
-oc cluster-info
 oc get nodes
 ```
 
-**Expected:** all nodes show `STATUS = Ready`. A hang or error here is a network/VPN/DNS issue
-reaching the API server, not a login problem.
+**Expected:** `oc whoami` prints your identity (or the account in the kubeconfig, e.g.
+`system:admin`), and every node shows `STATUS = Ready`. A hang here is a network, VPN, or DNS
+problem reaching the API server, not a login problem.
 
 **If `oc whoami` fails:**
-- *Token login:* the token likely expired — repeat Option 1.
-- *Kubeconfig login:* confirm the variable is set (`echo $env:KUBECONFIG` / `echo %KUBECONFIG%`
-  / `echo $KUBECONFIG`) and the file exists at that path
-  (`Test-Path $env:KUBECONFIG` / `dir "%KUBECONFIG%"` / `ls -la "$KUBECONFIG"`). Check which
-  identity/cluster it's configured for with `oc config get-contexts` and
-  `oc config current-context`.
-
-**Reference — read-only commands for sanity-checking the cluster at any point:**
-```
-oc version              # client + server version
-oc whoami                # current identity
-oc project               # current project/namespace
-oc get projects          # every project you can see
-oc get nodes             # cluster nodes
-oc get pods -A           # pods across all namespaces
-oc get namespaces        # list namespaces
-oc get clusteroperators  # cluster operator health
-```
+- *Token login:* the token has probably expired, so repeat Option 1.
+- *Kubeconfig login:* check that the variable is set (`echo $env:KUBECONFIG` /
+  `echo %KUBECONFIG%` / `echo $KUBECONFIG`) and that the file exists at that path
+  (`Test-Path $env:KUBECONFIG` / `dir "%KUBECONFIG%"` / `ls -la "$KUBECONFIG"`). See which
+  identity and cluster it points to with `oc config current-context`.
 
 ### B2 (jumpbox). Confirm cluster permissions
 
-This chart creates a namespace, ServiceAccount, Secrets, a ConfigMap, a DaemonSet, and a
-**RoleBinding to `system:openshift:scc:privileged`** — usually restricted to admins.
+This chart creates namespaced resources (ServiceAccount, RoleBinding, Secret, ConfigMap,
+DaemonSet) **and cluster-wide resources**: a custom **SecurityContextConstraints** and a
+**ClusterRole**. Creating cluster-wide resources usually needs cluster-admin rights.
 
-Check early for a signal:
+Check all three before going further:
 ```
 oc auth can-i create rolebindings -n edrf-tests
+oc auth can-i create clusterroles
+oc auth can-i create securitycontextconstraints
 ```
-If this returns `no`, ask your OpenShift platform/cluster-admin team to grant the permission,
-or to run the `helm install` command in Part G on your behalf.
 
-### B3 (any machine with a browser). Artifactory credentials
+**Expected:** `yes` for all three.
 
-You need an **API key or identity token**, not your regular login password — Artifactory does
-not accept SSO passwords for CLI/API pulls.
+If any of them return `no`, stop here. Ask your OpenShift platform or cluster-admin team to
+grant the permission, or to run `deploy.sh` (Part G) for you. Without it the install fails
+partway with a `forbidden` error.
+
+### B3 (any machine with a browser). Artifactory credentials (registry mode)
+
+You need an **identity token** (or API key), not your normal login password. Artifactory
+doesn't accept SSO passwords for CLI or API pulls.
 
 1. Log in at https://artifactory.trellix.com.
-2. Click your username/avatar (top-right) → **Edit Profile**.
+2. Click your username or avatar (top-right) → **Edit Profile**.
 3. Find **Generate an Identity Token** (newer JFrog UI) or **Generate API Key** (older UI).
-4. Generate one and save it to a password manager immediately — most Artifactory versions
-   only display it once.
+4. Generate one and save it in a password manager right away. Most Artifactory versions only
+   show it once.
 
-If your UI differs, check your Artifactory/DevOps support channel — the menu wording varies
-by version, but "Identity Token" / "API Key" under your profile is the standard JFrog
-location.
-
-**The identity token screen shows several fields — only one is the credential you use:**
+**The identity token screen shows several fields. Only one of them is the credential:**
 
 | Field shown on screen | Example shape | Use it? |
 |---|---|---|
-| **Reference token** | long string, e.g. `cmVmdGtu...` | Yes — this is the credential. Use it as `<artifactory_api_key>` throughout this guide (`--docker-password` in Part E, `curl -u` in Part C). |
-| Username | your email | This is `<artifactory_user>` |
-| Scope | e.g. `applied-permissions/user` | Informational only |
-| Audience | e.g. `*@*` | Informational only |
-| Expires In | e.g. `11 month(s) 30 day(s)` | Informational — tells you when to regenerate |
-| **Token ID** | short UUID, e.g. `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` | No — not a credential. An internal label for locating/revoking the token. Using it as a password fails with `401 Unauthorized`. |
+| **Reference token** | long base64 string, typically starting `cmVmdGtu...` | Yes, this is the credential. Use it as `<artifactory_token>` throughout this guide. |
+| Username | your email | This is `<artifactory_user>`. |
+| Scope / Audience | e.g. `applied-permissions/user`, `*@*` | Informational only. |
+| Expires In | e.g. `11 month(s) 30 day(s)` | Tells you when to generate a new one. |
+| **Token ID** | short UUID, e.g. `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` | No, this isn't a credential. Using it as a password fails with `401 Unauthorized`. |
 
-The Reference Token and Token ID look similarly random at a glance — if a pull or lookup
-fails with `401`, confirm you used the Reference Token, not the Token ID.
-
-### B4 (any machine — information only). ePO server details
+### B4 (any machine, information only). ePO server details
 
 The agent needs:
-- ePO IP/hostname
+- ePO IP or hostname
 - ePO username
 - ePO password
 
-Request these from the team managing ePO for your environment. A dedicated service account
-is preferred over a personal login.
+Get these from the team that manages ePO for your environment. A dedicated service account is
+better than a personal login.
 
-### B5 (jumpbox). Extract the Helm chart
+You also need a **cluster name**, the label this cluster will have in ePO. Get the cluster's
+infrastructure name with:
+```
+oc get infrastructure cluster -o jsonpath='{.status.infrastructureName}'
+```
+This returns something like `mycluster-ab1cd`, where the part before the random suffix
+(`mycluster`) is usually the value to use. Node names follow the same pattern
+(`mycluster-ab1cd-worker-a-xyz12`). If other clusters already report to your ePO, follow their
+naming convention.
 
-Extract the chart on the jumpbox — Parts D onward run `helm` commands from this folder. If
-the archive is only on your workstation, transfer it to the jumpbox first.
+### B5 (jumpbox). Get and extract the bundle
 
-This guide assumes `C:\edrf-deploy` (Windows) or `~/edrf-deploy` (Linux/Mac); adjust the path
-if you use a different location.
+Get `edrf-xclient-bundle-<version>.tar.gz` from your build or release team. Copy it to the
+jumpbox, then extract it into a **new, empty folder** so it doesn't mix with older chart
+copies. `tar` is built into Windows 10/11, so the extract command is the same everywhere.
 
 **PowerShell:**
 ```powershell
-mkdir C:\edrf-deploy
-Expand-Archive -Path C:\path\to\edrf-xclient.zip -DestinationPath C:\edrf-deploy
+mkdir C:\edrf-deploy\bundle
+cd C:\edrf-deploy\bundle
+tar -xzf C:\path\to\edrf-xclient-bundle-<version>.tar.gz
 ```
 **cmd.exe:**
 ```cmd
-mkdir C:\edrf-deploy
-tar -xf C:\path\to\edrf-xclient.zip -C C:\edrf-deploy
+mkdir C:\edrf-deploy\bundle
+cd /d C:\edrf-deploy\bundle
+tar -xzf C:\path\to\edrf-xclient-bundle-<version>.tar.gz
 ```
 **Linux/Mac:**
 ```bash
-mkdir -p ~/edrf-deploy
-unzip ~/Downloads/edrf-xclient.zip -d ~/edrf-deploy
+mkdir -p ~/edrf-deploy/bundle
+cd ~/edrf-deploy/bundle
+tar -xzf /path/to/edrf-xclient-bundle-<version>.tar.gz
 ```
-(If `unzip` is missing: `sudo apt install unzip` or `sudo yum install unzip`. Mac includes
-`unzip` by default.)
 
-Resulting layout:
+**Verify:**
+```
+dir          (Windows)
+ls -la       (Linux/Mac)
+```
+
+**Expected:** three items:
+```text
+image.tar        # container image (only used in airgap mode)
+edrf-xclient/    # Helm chart
+deploy.sh        # install script
+```
+
+The chart layout, for reference:
 ```text
 edrf-xclient/
-├── Chart.yaml                   # chart identity: name, version, description
-├── values.yaml                  # every configurable value (ePO, image, resources, deployment identity)
+├── Chart.yaml
+├── values.yaml                  # default values (deploy.sh flags override these)
 └── templates/
-    ├── 01-serviceaccount.yaml   # ServiceAccount + RoleBinding for the privileged SCC
-    ├── 02-epo-details.yaml      # ConfigMap + Secret holding ePO credentials
-    └── 03-deploy-edrf.yaml      # the DaemonSet that runs XClient on every node
-```
-Values are supplied via `--set` flags in Part G, not by editing `values.yaml` or the
-templates directly.
-
-**Background:** the container image bundles DXL (Data Exchange Layer). The DaemonSet injects
-identity environment variables for Kubernetes-side telemetry — `CLUSTER_NAME` /
-`DEPLOYMENT_MODE` (from `deploymentDetails`, set in Part G), `POD_NAME`, and
-`TRELLIX_KUBERNETES_ENVIRONMENT=1` — and mounts the host's `/etc/os-release` so the agent
-reports the host OS rather than the container image's OS.
-
-Run all subsequent commands from this folder:
-```
-cd C:\edrf-deploy        # Windows
-cd ~/edrf-deploy          # Linux/Mac
+    ├── 01-serviceaccount.yaml   # ServiceAccount, custom SCC, ClusterRole, RoleBinding
+    ├── 02-epo-details.yaml      # ConfigMap + Secret holding ePO connection details
+    └── 03-deploy-edrf.yaml      # the DaemonSet that runs XClient on every Linux node
 ```
 
-**Sanity-check the chart**, from the parent of `edrf-xclient` (identical across shells):
-```
-helm lint ./edrf-xclient
-```
+**You don't need to edit `values.yaml`.** `deploy.sh` passes every required value as a flag.
+If you do edit it (for example, to run the dry-run in Part F without `--set` flags), keep
+that copy out of git, because it would contain the ePO password.
 
-**Expected:** `level=WARN msg="missing required values"` lines are normal at this stage (values
-haven't been supplied yet). The line that matters is:
-```
-1 chart(s) linted, 0 chart(s) failed
-```
-`0 chart(s) failed` confirms the chart is structurally valid.
-
-> **If you instead see:**
-> ```
-> Error unable to check Chart.yaml file in chart: GetFileAttributesEx edrf-xclient\Chart.yaml: The system cannot find the path specified.
-> ```
-> (Windows) or
-> ```
-> Error unable to check Chart.yaml file in chart: stat edrf-xclient/Chart.yaml: no such file or directory
-> ```
-> (Linux/Mac) — the command is being run from the wrong directory, commonly because you're
-> already inside `edrf-xclient` itself. Check your location:
-> ```powershell
-> Get-Location                              # PowerShell
-> ```
-> ```cmd
-> cd                                        :: cmd.exe, no arguments
-> ```
-> ```bash
-> pwd                                       # Linux/Mac
-> ```
-> then move up one level and retry:
-> ```
-> cd C:\edrf-deploy     (Windows)     /     cd ~/edrf-deploy     (Linux/Mac)
-> helm lint ./edrf-xclient
-> ```
-> Every `helm` command in this guide assumes you're one level above the `edrf-xclient`
-> folder. A path error is almost always a wrong-directory problem — check your location
-> first.
+Run all later commands from this bundle folder.
 
 ---
 
-## Part C (Artifactory-reachable machine — see Part 0) — Resolve the image repository and digest
+## Part C (Artifactory-reachable machine, registry mode) — Get the image repository and digest
 
-If Part 0 showed the jumpbox has no internet access, run this part on your workstation
-instead. Only `curl` and your Artifactory credentials are needed — not `oc`, `helm`, or the
-chart. Carry the resulting `image.repository` and `image.digest` values back to the jumpbox
-for Part G.
+Skip this part in airgap mode.
 
-A typical Artifactory container path —
-`https://artifactory.trellix.com/artifactory/edrf-xclient-container-security/trellix-edrf/114/`
-— is the web UI browse page for a given build (the trailing `/` makes it a folder listing,
-not a file). `values.yaml` requires two separate fields:
+If Part 0 showed the jumpbox has no internet access, run this part on your workstation. You
+only need `curl` and your Artifactory credentials.
 
-```yaml
-image:
-  repository: ""   # e.g. artifactory.trellix.com/edrf-xclient-container-security/trellix-edrf
-  digest: ""        # e.g. sha256:3f9a1c...
-```
+You need two values for `deploy.sh`:
+- `--image-repo`, e.g. `artifactory.trellix.com/edrf-xclient-container-security/trellix-edrf`
+- `--image-digest`, e.g. `sha256:<64 hex characters>`
 
-**PowerShell note, applies to every command below:** PowerShell aliases `curl` to
-`Invoke-WebRequest`. Use `curl.exe` explicitly. `cmd.exe` and Linux/Mac use plain `curl` as
-written.
+A typical Artifactory browse URL for a build looks like
+`https://artifactory.trellix.com/artifactory/edrf-xclient-container-security/trellix-edrf/114/`,
+where `114` is the build number. Use the build number that matches your bundle.
 
 ### Method 1 (preferred) — Artifactory Storage API
 
-A Docker image digest is the SHA256 checksum of its manifest file. Artifactory's Storage API
-returns that checksum directly, using the same path from the browse UI (`api/storage/`
-inserted after `/artifactory/`, with the manifest filename appended):
+A Docker image digest is the SHA256 checksum of its manifest. Artifactory's Storage API returns
+it directly:
 
 ```
-curl -s -u "<artifactory_user>:<artifactory_api_key>" "https://artifactory.trellix.com/artifactory/api/storage/edrf-xclient-container-security/trellix-edrf/114/manifest.json"
+curl -s -u "<artifactory_user>:<artifactory_token>" "https://artifactory.trellix.com/artifactory/api/storage/edrf-xclient-container-security/trellix-edrf/<build>/manifest.json"
 ```
 (PowerShell: `curl.exe`.)
 
@@ -510,73 +505,54 @@ A working response:
 ```json
 {
   "repo": "edrf-xclient-container-security",
-  "path": "/trellix-edrf/114/manifest.json",
+  "path": "/trellix-edrf/<build>/manifest.json",
   "checksums": {
     "sha1": "...",
     "md5": "...",
-    "sha256": "3f9a1c0b7e..."
+    "sha256": "<64 hex characters>"
   }
 }
 ```
-Prepend `sha256:` to the `sha256` value for `image.digest`. `image.repository` is:
+Your digest is `sha256:` followed by the `sha256` value. Your image repository is:
 ```
 artifactory.trellix.com/edrf-xclient-container-security/trellix-edrf
 ```
 
-**If the response isn't clean JSON**, re-run with `-v` to see the full response:
-```
-curl -v -u "<artifactory_user>:<artifactory_api_key>" "https://artifactory.trellix.com/artifactory/api/storage/edrf-xclient-container-security/trellix-edrf/114/manifest.json"
-```
-(PowerShell: `curl.exe`.)
-
-Check the HTTP status:
-- **`200 OK` with `"children": [...]` instead of `"checksums"`** → `114` is a folder and
-  `manifest.json` isn't the actual filename. List the folder first:
-  ```
-  curl -s -u "<artifactory_user>:<artifactory_api_key>" "https://artifactory.trellix.com/artifactory/api/storage/edrf-xclient-container-security/trellix-edrf/114/"
-  ```
-  then re-run with the real filename.
-- **`401 Unauthorized` / `403 Forbidden`** → the username or identity token is wrong, expired,
-  or lacks read access — see Part B3, confirm you're using the Reference Token.
-- **`404 Not Found`** → `edrf-xclient-container-security` may be a display name rather than
-  the actual repo key, or build 114 doesn't exist at this path. Confirm the repo key and path
-  with whoever provided the Artifactory link or your CI/build team.
-- **`302` redirect or an HTML login page instead of JSON** → the instance is rejecting this
-  auth method for API calls (common with SSO-integrated setups). Check with your Artifactory
-  admins whether a different token type or header is required.
+**If the response isn't clean JSON**, re-run with `-v` instead of `-s` and check the HTTP
+status:
+- **`200 OK` with `"children": [...]`** means `<build>` is a folder and `manifest.json` isn't
+  the real filename. List the folder (remove `manifest.json` from the URL) and retry with the
+  real name.
+- **`401` / `403`** means the username or token is wrong, expired, or lacks read access. Check
+  you used the **Reference Token** (Part B3).
+- **`404`** means the repo key or build number is wrong. Confirm the path with your build team.
+- **`302` redirect or an HTML login page** means this auth method is rejected for API calls.
+  Check with your Artifactory admins.
 
 ### Method 2 (fallback) — Docker Registry API
 
-If the actual Docker repository name differs from the browse-UI name (some orgs use a
-`-docker` suffix), query the registry directly:
+If the Docker repository name differs from the browse-UI name:
 
 **PowerShell:**
 ```powershell
-curl.exe -sI -u "<artifactory_user>:<artifactory_api_key>" -H "Accept: application/vnd.docker.distribution.manifest.v2+json" "https://artifactory.trellix.com/artifactory/api/docker/<docker-repo-name>/v2/trellix-edrf/manifests/114" | Select-String -Pattern "docker-content-digest"
+curl.exe -sI -u "<artifactory_user>:<artifactory_token>" -H "Accept: application/vnd.docker.distribution.manifest.v2+json" "https://artifactory.trellix.com/artifactory/api/docker/<docker-repo-name>/v2/trellix-edrf/manifests/<build>" | Select-String -Pattern "docker-content-digest"
 ```
 **cmd.exe:**
 ```cmd
-curl -sI -u "<artifactory_user>:<artifactory_api_key>" -H "Accept: application/vnd.docker.distribution.manifest.v2+json" "https://artifactory.trellix.com/artifactory/api/docker/<docker-repo-name>/v2/trellix-edrf/manifests/114" | findstr /i "docker-content-digest"
+curl -sI -u "<artifactory_user>:<artifactory_token>" -H "Accept: application/vnd.docker.distribution.manifest.v2+json" "https://artifactory.trellix.com/artifactory/api/docker/<docker-repo-name>/v2/trellix-edrf/manifests/<build>" | findstr /i "docker-content-digest"
 ```
 **Linux/Mac:**
 ```bash
-curl -sI -u "<artifactory_user>:<artifactory_api_key>" -H "Accept: application/vnd.docker.distribution.manifest.v2+json" "https://artifactory.trellix.com/artifactory/api/docker/<docker-repo-name>/v2/trellix-edrf/manifests/114" | grep -i docker-content-digest
+curl -sI -u "<artifactory_user>:<artifactory_token>" -H "Accept: application/vnd.docker.distribution.manifest.v2+json" "https://artifactory.trellix.com/artifactory/api/docker/<docker-repo-name>/v2/trellix-edrf/manifests/<build>" | grep -i docker-content-digest
 ```
-Replace `<docker-repo-name>` with the actual repository name. A working response prints:
-```
-Docker-Content-Digest: sha256:3f9a1c0b7e...
-```
-`image.repository` is `artifactory.trellix.com/<docker-repo-name>/trellix-edrf`;
-`image.digest` is the printed value.
-
----
-
-Keep the resolved repository + digest for Part G. Do not write the digest into
-`values.yaml` directly — it changes with every build.
+**Expected:** `Docker-Content-Digest: sha256:...`. The repository is then
+`artifactory.trellix.com/<docker-repo-name>/trellix-edrf`.
 
 ---
 
 ## Part D (jumpbox) — Create the namespace
+
+Create the namespace **before** the pull secret, because the secret is created inside it.
 
 ```
 oc new-project edrf-tests
@@ -587,25 +563,28 @@ oc project edrf-tests
 ```
 **Verify:**
 ```
-oc project
+oc get ns edrf-tests
 ```
 
-**Expected:** `Using project "edrf-tests" on server ...`.
+**Expected:** one row with `STATUS Active`.
 
 ---
 
-## Part E (jumpbox) — Create the Artifactory image pull secret
+## Part E (jumpbox, registry mode) — Create the Artifactory pull secret
 
-OpenShift needs its own copy of your Artifactory credentials to pull the private image. This
-command builds the secret correctly, identical across all three shells:
+Skip this part in airgap mode.
+
+OpenShift needs its own copy of your Artifactory credentials to pull the private image. Create
+it once per namespace. If you're upgrading an existing deployment, it probably already exists,
+so run the verify command first.
 
 ```
-oc create secret docker-registry artifactory-pull-secret --docker-server=artifactory.trellix.com --docker-username="<artifactory_user>" --docker-password="<artifactory_api_key>" -n edrf-tests
+oc create secret docker-registry artifactory-pull-secret --docker-server=artifactory.trellix.com --docker-username="<artifactory_user>" --docker-password="<artifactory_token>" -n edrf-tests
 ```
 
-**If the token contains special characters** like `&`, `|`, `^`, or `!`, `cmd.exe` can
-misinterpret them even inside quotes — run this command from PowerShell instead, or
-regenerate a token without those characters.
+Use the **Reference Token** as the password (Part B3). If the token contains characters such as
+`&`, `|`, `^`, or `!`, `cmd.exe` can misread them even inside quotes, so run this command from
+PowerShell instead.
 
 **Verify:**
 ```
@@ -614,146 +593,227 @@ oc get secret artifactory-pull-secret -n edrf-tests
 
 **Expected:** one row, `TYPE kubernetes.io/dockerconfigjson`.
 
-Note the secret name — `artifactory-pull-secret` — it's used as `imagePullSecret` in Part G.
+The secret's **name**, `artifactory-pull-secret`, is what you pass to `deploy.sh` as
+`--image-pull-secret`. Never pass the token itself.
 
-**What this creates:** a `kubernetes.io/dockerconfigjson` secret, the same `config.json`
-format Docker uses for registry logins:
-```json
-{
-  "auths": {
-    "artifactory.trellix.com": {
-      "username": "<artifactory_user>",
-      "password": "<artifactory_api_key>",
-      "auth": "<base64 of artifactory_user:artifactory_api_key>",
-      "email": "<artifactory_user>"
-    }
-  }
-}
-```
-The `auth` field is `username:password`, base64-encoded. Do not construct this file by hand —
-the command above handles the encoding correctly. To inspect the decoded contents:
-```
-oc get secret artifactory-pull-secret -n edrf-tests -o jsonpath='{.data.\.dockerconfigjson}'
-```
-Pipe the (base64) output through `| base64 -d` on Linux/Mac, or
-`| % {[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_))}` in PowerShell, to
-read it in plain text. Treat that output as a live credential.
+> **Note:** the product README creates this secret with
+> `oc create secret generic <name> --from-file=.dockerconfigjson=config.json --type=kubernetes.io/dockerconfigjson`.
+> That produces the same secret type, but you have to build `config.json` by hand, and its
+> `auth` field must be base64 of `username:token`. Getting that wrong is a common cause of
+> `401` pull failures. `oc create secret docker-registry` builds it correctly for you.
 
 ---
 
-## Part F (jumpbox) — Pre-create the ePO password secret (recommended)
+## Part F (jumpbox) — Dry-run the chart (recommended)
 
-Using an existing secret keeps the ePO password out of shell history and `helm get values`
-output.
+A dry-run catches missing or wrong values before anything changes on the cluster. Run it from
+the bundle folder with the same values you'll give `deploy.sh`. This is a single line and works
+in all three shells:
 
 ```
-oc create secret generic epo-existing-secret --from-literal=epo-passwd="<epo_password>" -n edrf-tests
-```
-(Same special-character caveat as Part E — switch to PowerShell or bash if `cmd.exe`
-misinterprets the password.)
-
-**Verify:**
-```
-oc get secret epo-existing-secret -n edrf-tests
+helm upgrade --install edrf-xclient ./edrf-xclient -n edrf-tests --set epo.ip="<epo_ip>" --set epo.user="<epo_user>" --set epo.password="<epo_password>" --set deploymentDetails.clusterName="<cluster_name>" --set image.repository="<image_repo>" --set image.digest="sha256:<digest>" --set imagePullSecret="artifactory-pull-secret" --dry-run=client
 ```
 
-Reference it by name (`epo.existingSecret=epo-existing-secret`) in Part G. Passing the
-password inline instead is also supported — see the note there.
+**Expected:** a long list of rendered manifests ending without errors. The output includes
+these lines, which are **normal for a dry-run**. Nothing was changed on the cluster:
+```
+Release "edrf-xclient" has been upgraded. Happy Helming!
+STATUS: pending-upgrade
+DESCRIPTION: Dry run complete
+```
+The manifests should include a `SecurityContextConstraints` named `edrf-xclient-edrf-tests`, a
+`ClusterRole`, a `RoleBinding`, and a `DaemonSet` whose `image:` line ends in your digest.
+
+An `execution error ... is required` means a value is missing or misspelled. Fix it and re-run.
 
 ---
 
-## Part G (jumpbox) — Dry-run, then install
+## Part G (jumpbox) — Run `deploy.sh`
 
-Confirm you're in `C:\edrf-deploy` (or `~/edrf-deploy`), with `edrf-xclient` present.
+### G1. Registry mode
 
-**Step 1 — dry run.** Renders and validates against the cluster without creating anything:
+Run from the bundle folder (the one containing `deploy.sh`). Replace every `<...>`
+placeholder. **Pick the block for your shell.**
 
-```
-helm upgrade --install edrf-xclient ./edrf-xclient -n edrf-tests --set image.repository="artifactory.trellix.com/<docker-repo-name>/trellix-edrf" --set image.digest="sha256:<digest-from-part-c>" --set imagePullSecret="artifactory-pull-secret" --set epo.ip="<epo_ip>" --set epo.user="<epo_user>" --set epo.existingSecret="epo-existing-secret" --set deploymentDetails.clusterName="<your-cluster-name>" --dry-run=client
-```
-
-Replace every `<...>` placeholder with values collected in Parts B and C.
-
-- If you skipped Part F, remove `--set epo.existingSecret="epo-existing-secret"` and add
-  `--set epo.password="<epo_password>"` instead.
-- `<your-cluster-name>` is a label identifying this cluster in reporting. OpenShift's
-  installer names nodes `<cluster-name>-<random-infra-id>-<role>-<index>` — the part before
-  the random suffix is usually the right value. Confirm with:
-  ```
-  oc get infrastructure cluster -o jsonpath='{.status.infrastructureName}'
-  ```
-  If your ePO console already has agents reporting from other clusters, match their naming
-  convention — this is ultimately a reporting-identity decision for whoever manages ePO, not
-  a technical constraint of the chart.
-
-An `execution error ... is required` means a `--set` value is missing or misspelled — fix and
-re-run before continuing.
-
-**Optional — render without touching the cluster at all.** `helm template` renders entirely
-locally (no `oc login` required), useful for reviewing every manifest line before applying
-anything:
-```
-helm template edrf-xclient ./edrf-xclient --set image.repository="artifactory.trellix.com/<docker-repo-name>/trellix-edrf" --set image.digest="sha256:<digest-from-part-c>" --set imagePullSecret="artifactory-pull-secret" --set epo.ip="<epo_ip>" --set epo.user="<epo_user>" --set epo.existingSecret="epo-existing-secret" --set deploymentDetails.clusterName="<your-cluster-name>" > rendered.yaml
+**cmd.exe** (one line; launches Git Bash from this window so it inherits your login):
+```cmd
+"C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace edrf-tests --epo-ip <epo_ip> --epo-user <epo_user> --epo-password "<epo_password>" --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret
 ```
 
-**Step 2 — real install.** Same command with `--dry-run=client` removed:
-
+**PowerShell** (one line; note the leading `&`):
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace edrf-tests --epo-ip <epo_ip> --epo-user <epo_user> --epo-password "<epo_password>" --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret
 ```
-helm upgrade --install edrf-xclient ./edrf-xclient -n edrf-tests --set image.repository="artifactory.trellix.com/<docker-repo-name>/trellix-edrf" --set image.digest="sha256:<digest-from-part-c>" --set imagePullSecret="artifactory-pull-secret" --set epo.ip="<epo_ip>" --set epo.user="<epo_user>" --set epo.existingSecret="epo-existing-secret" --set deploymentDetails.clusterName="<your-cluster-name>"
+
+**Linux/Mac, or inside a Git Bash window:**
+```bash
+chmod +x deploy.sh
+./deploy.sh \
+  --namespace edrf-tests \
+  --epo-ip <epo_ip> \
+  --epo-user <epo_user> \
+  --epo-password '<epo_password>' \
+  --cluster-name <cluster_name> \
+  --image-repo <image_repo> \
+  --image-digest sha256:<digest> \
+  --image-pull-secret artifactory-pull-secret
 ```
 
-**Expected:** ends with `STATUS: deployed`.
+**Shell rules that cause most first-time failures:**
+- **Never type `./deploy.sh` directly in `cmd.exe` or PowerShell.** Always go through Git
+  Bash, as shown above.
+- In `cmd.exe` and PowerShell, keep the command on **one line**. The `\` line continuation
+  only works in bash.
+- In `cmd.exe`, quote the password with **double quotes**. In bash, use **single quotes**
+  (so characters such as `$` and `!` aren't interpreted).
+- To see every flag the script accepts, run it with `--help`, e.g.
+  `"C:\Program Files\Git\bin\bash.exe" ./deploy.sh --help`.
 
-This creates, in order: an `edrf-admin` ServiceAccount with the privileged-SCC RoleBinding,
-an `epo-details` ConfigMap (and Secret, if not using an existing one), and a DaemonSet
-(`edrf-xclient-container-security`) running one pod per Linux node. The pod runs with host
-networking, host PID namespace, and privileged mode — required for the agent to observe
-kernel/container activity on the node.
+**Expected output:**
+```
+==> Mode: registry (image: <image_repo>@sha256:<digest>)
+==> Installing Helm chart
+Release "edrf-xclient" has been upgraded. Happy Helming!
+NAME: edrf-xclient
+NAMESPACE: edrf-tests
+STATUS: deployed
+REVISION: <n>
+DESCRIPTION: Upgrade complete
 
-A `Forbidden` error mentioning `rolebindings` or `clusterroles` means insufficient
-permissions — return to Part B2.
+==> Deployment complete. Check pod status:
+    oc get pods -n edrf-tests
+```
+On a first install, `Release "edrf-xclient" does not exist. Installing it now.` and
+`REVISION: 1` appear instead. Both are success.
+
+### G2. Airgap mode
+
+In airgap mode the script loads `image.tar`, finds the cluster's internal registry route, logs
+in with `oc registry login`, pushes the image, captures its digest, and installs, so you don't
+pass `--image-repo`, `--image-digest`, or `--image-pull-secret`.
+
+**Before the first airgap run:**
+1. Docker is installed and running on the jumpbox (Part A4).
+2. A cluster-admin exposes the internal registry route (one-time, cluster-wide):
+   ```
+   oc patch configs.imageregistry.operator.openshift.io/cluster --patch "{\"spec\":{\"defaultRoute\":true}}" --type=merge
+   ```
+   (The escaped double quotes work in `cmd.exe` and PowerShell. In bash you can use
+   `--patch '{"spec":{"defaultRoute":true}}'`.)
+
+**cmd.exe:**
+```cmd
+"C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace edrf-tests --epo-ip <epo_ip> --epo-user <epo_user> --epo-password "<epo_password>" --cluster-name <cluster_name> --mode airgap
+```
+**PowerShell:**
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace edrf-tests --epo-ip <epo_ip> --epo-user <epo_user> --epo-password "<epo_password>" --cluster-name <cluster_name> --mode airgap
+```
+**Linux/Mac or Git Bash:**
+```bash
+./deploy.sh --namespace edrf-tests --epo-ip <epo_ip> --epo-user <epo_user> --epo-password '<epo_password>' --cluster-name <cluster_name> --mode airgap
+```
 
 ---
 
-## Part H (jumpbox) — Link the pull secret to the service account
+## Part H (jumpbox) — Verify the deployment
 
-`edrf-admin` is created during the Part G install, so this step must run after, not before:
-
-```
-oc secrets link edrf-admin artifactory-pull-secret --for=pull -n edrf-tests
-```
-
-The DaemonSet also references the pull secret directly in its pod spec, so pulls should
-already succeed without this — this step covers anything else running as this
-ServiceAccount later.
-
----
-
-## Part I (jumpbox) — Verify the deployment
+### H1. Wait for the rollout to finish
 
 ```
-# One pod per Linux node — all should be Running, not Pending/ImagePullBackOff/CrashLoopBackOff
-oc get pods -n edrf-tests -o wide
+oc rollout status ds/edrf-xclient-container-security -n edrf-tests
+```
 
-# Overall Helm release status
-helm status edrf-xclient -n edrf-tests
+**Expected:** `daemon set "edrf-xclient-container-security" successfully rolled out`.
 
-# Confirm applied values (--all includes values.yaml defaults, not just --set overrides)
-helm get values edrf-xclient -n edrf-tests --all
+**On an upgrade, this can take 20–25 minutes.** Old pods are replaced one node at a time, and
+each old pod is given up to **8 minutes (480 seconds)** to stop the agent gracefully. A pod
+in `Terminating` for several minutes is normal. Don't force-delete it unless it's been stuck
+for more than about 10 minutes.
 
-# Tail logs to confirm the agent connected to ePO
-oc logs -n edrf-tests -l name=edrf-xclient-container-security --tail=100
+### H2. Check pods and the release
 
-# Every Helm release in this namespace
+```
 helm list -n edrf-tests
-
-# Every release across all namespaces you can see
-helm list --all-namespaces
+oc get pods -n edrf-tests -o wide
 ```
 
-**Expected:** one `Running` pod per Linux worker node, `helm status` showing
-`STATUS: deployed`, and pod logs showing a successful ePO connection — a `Running` status
-alone only confirms the container started, not that the agent is reporting.
+**Expected:**
+- `helm list` shows `STATUS deployed` with the new revision number.
+- One pod per Linux worker node, all `1/1 Running`, `RESTARTS 0`. After an upgrade, the pod
+  names and `AGE` should be new.
+
+To watch pods change live, add `-w` (press Ctrl+C to stop):
+```
+oc get pods -n edrf-tests -o wide -w
+```
+
+### H3. Check the agent logs
+
+```
+oc logs -n edrf-tests <pod-name>
+```
+Or for all pods at once:
+```
+oc logs -n edrf-tests -l name=edrf-xclient-container-security --tail=100
+```
+
+**Expected:** the McAfee Agent provisions against ePO, then MA and XClient start, with no
+repeating errors. `Running` on its own only means the container started, not that the agent
+is reporting.
+
+### H4. Confirm in ePO
+
+Check that every worker node appears in the ePO console with a recent last-communication time.
+
+### H5. Recheck restarts after about an hour
+
+```
+oc get pods -n edrf-tests
+```
+
+`RESTARTS` should still be `0`. If it's climbing, the agent is crashing and Kubernetes is
+restarting it, even though the pod looks `Running` most of the time. See Part J.
+
+---
+
+## Part I (jumpbox) — Collect agent logs from a pod
+
+Use this when the dev or support team asks for agent logs.
+
+**1. Open a shell inside the pod:**
+```
+oc exec -it -n edrf-tests <pod-name> -- /bin/bash
+```
+(Use `/bin/sh` if bash isn't in the image.)
+
+**2. Inside the pod, find the logs and check the agent process:**
+```bash
+ps -o pid,ppid,cmd -C xclient
+ls -lrth /tmp
+ls -lrth /var/lib/Trellix/XClient/
+exit
+```
+
+**3. Copy a file out of the pod to your current folder.** Use a **relative** destination such
+as `./<file>`:
+```
+oc cp -n edrf-tests <pod-name>:/tmp/<log-file-name> ./<log-file-name>
+```
+
+> **Windows:** don't use a destination that starts with a drive letter (for example
+> `C:\edrf-deploy\file.log`). `oc cp` splits arguments on `:`, so the drive-letter colon
+> makes it fail with `error: one of src or dest must be a local file specification`. `cd` to
+> the destination folder first and use `./<file>`.
+
+The agent data, MA logs, and TA config also persist on each **node** under
+`/mnt/XClientLogs/` (`xclient`, `fexgt`, `ma-logs`), so they survive pod restarts. To browse
+them from the node:
+```
+oc debug node/<node-name>
+chroot /host
+ls -lrth /mnt/XClientLogs/
+```
 
 ---
 
@@ -761,30 +821,40 @@ alone only confirms the container started, not that the agent is reporting.
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `execution error ... required` during `helm upgrade --install` | A required `--set` value is missing or misspelled | Re-check every value against Parts B/C/D/E/F |
-| `Forbidden` / RBAC error during install | Insufficient permission to create the RoleBinding | Part B2 — request access from your platform/cluster-admin team |
-| `namespace "<ns>" not found` when creating a secret | The namespace doesn't exist yet, or was created after an earlier failed attempt | Run Part D, then re-run the secret command and confirm it succeeded with `oc get secret -n <ns>` — don't assume a prior command worked |
-| `secret "<name>" not found` when running `oc secrets link` | The secret was never actually created (a common follow-on from the row above) | Verify with `oc get secret -n <ns>`, then re-run Part E |
-| Pod shows `ImagePullBackOff`, event `Authentication is required` / `Unable to retrieve some image pull secrets` | The pull secret didn't exist (or wasn't in the right namespace) when the pod was scheduled | Fix the secret (Part E), then force an immediate retry — don't wait for kubelet's backoff timer: `oc delete pod -n edrf-tests -l name=edrf-xclient-container-security` |
-| Pod stuck in `Pending` | The ServiceAccount didn't get the privileged SCC binding | Confirm with `oc get rolebinding -n edrf-tests`; if missing, re-run Part G with sufficient permissions |
-| Pod `Running`, but not visible in the ePO console | Wrong `epo.user`/`epo.password` (including leftover placeholder values), `epo.ip` unreachable from the worker node network, or the agent is pending manual approval in ePO | Check `oc logs <pod-name> -n edrf-tests` for connection/auth errors; confirm `epo.ip` is reachable from the worker node itself (pods run `hostNetwork: true`, so test from the node, not the pod network, via `oc debug node/<node-name>`); ask your ePO admin to check the pending/unmanaged systems list |
-| `CrashLoopBackOff`, logs mention ePO connection failures | Wrong ePO IP/user/password, or the cluster can't reach the ePO server | Re-check Part B4 values; confirm network reachability with your network team |
-| Agent reports the container's OS instead of the host's | Should not occur — the chart mounts `/etc/os-release` automatically | `oc describe pod <pod-name> -n edrf-tests` and confirm the `host-os-release` volume is mounted; if missing, verify the chart version |
+| `'.' is not recognized as an internal or external command` | `./deploy.sh` was typed directly in `cmd.exe` or PowerShell | Run it through Git Bash (Part G1). Install Git for Windows first if needed (Part A3). |
+| `'--namespace' is not recognized...` (one error per line) | A multi-line command with `\` continuation was pasted into `cmd.exe` | Use the one-line `cmd.exe` form in Part G1 |
+| `The system cannot find the path specified` for `bash.exe` | Git for Windows isn't installed, or is installed somewhere else | Part A3: install it, or find the real path with `where.exe git` |
+| `oc: command not found` or `helm: command not found` from inside `deploy.sh` | bash can't see your Windows tools. Common causes are using WSL (plain `bash`) instead of Git Bash, or `oc`/`helm` not on the Windows PATH | Call Git Bash by its full path (Part A3); confirm `where.exe oc` and `where.exe helm` work in a new window (Parts A1–A2) |
+| `deploy.sh` fails with `Unauthorized` / `You must be logged in` | Login expired, or `KUBECONFIG` wasn't inherited by Git Bash | Re-run `oc whoami` in the same window, then launch `deploy.sh` from that window (Part B1 note) |
+| `forbidden` mentioning `securitycontextconstraints` or `clusterroles` | Your account can't create cluster-wide resources | Part B2: a cluster-admin grants access or runs `deploy.sh` |
+| `execution error ... is required` | A required value is missing or misspelled | Check every `deploy.sh` flag; run the Part F dry-run to see which value |
+| `namespace "<ns>" not found` when creating a secret | The namespace doesn't exist yet | Part D, then re-run the secret command and verify with `oc get secret -n <ns>` |
+| `ImagePullBackOff` with `Authentication is required` or `Unable to retrieve some image pull secrets` | The pull secret is missing, in the wrong namespace, or has the Token ID instead of the Reference Token | Fix it (Parts B3, E), then force a retry: `oc delete pod -n edrf-tests -l name=edrf-xclient-container-security` |
+| `ImagePullBackOff` with a timeout or `no route to host` | The worker nodes can't reach Artifactory | Use airgap mode (Part G2), or ask the network team to open access |
+| Pods not created at all, or the DaemonSet events mention `unable to validate against any security context constraint` | The ServiceAccount isn't allowed to use the custom SCC | Check `oc get scc edrf-xclient-edrf-tests` and `oc get rolebinding -n edrf-tests`. If missing, re-run `deploy.sh` with sufficient permissions (Part B2). |
+| Old pod stuck in `Terminating` | Normal for up to 8 minutes (graceful agent stop) | Wait. Only if it's still there after about 10 minutes, run `oc delete pod -n edrf-tests <pod-name> --force --grace-period=0` |
+| Pod `Running` but `RESTARTS` keeps increasing | The agent is crashing and being restarted | `oc describe pod -n edrf-tests <pod-name>`: under **Last State**, `Reason: OOMKilled` means it hit the 4Gi memory limit, and `Error` with an exit code means the agent died. Get its last output with `oc logs -n edrf-tests <pod-name> --previous` and send both to the dev team. |
+| `CrashLoopBackOff`, logs mention ePO connection failures | Wrong ePO IP, user, or password, or the node can't reach ePO | Re-check Part B4 values; test reachability from the node with `oc debug node/<node-name>` (pods use `hostNetwork: true`) |
+| Pod `Running`, but not visible in the ePO console | Wrong ePO credentials, ePO unreachable from the node, or the agent is waiting for approval in ePO | Check `oc logs`; ask your ePO admin to check the pending or unmanaged systems list |
+| `error: one of src or dest must be a local file specification` from `oc cp` | A Windows destination path starting with a drive letter (`C:\...`) | `cd` to the destination folder and use `./<file>` (Part I) |
 
 For anything not covered above, `oc describe pod <pod-name> -n edrf-tests` and
-`oc logs <pod-name> -n edrf-tests` resolve most issues directly.
+`oc logs <pod-name> -n edrf-tests` usually show the cause directly.
 
 ---
 
-## Part K (jumpbox, plus Part C's machine) — Upgrading to a new build
+## Part K (jumpbox) — Upgrading to a new build
 
-When a new build ships with a new digest, repeat only Part C for the new digest, then:
+An upgrade is the same process as an install:
 
-```
-helm upgrade edrf-xclient ./edrf-xclient -n edrf-tests --reuse-values --set image.digest="sha256:<new-digest>"
-```
+1. Get the new bundle and extract it into a **new** folder (Part B5).
+2. Registry mode: get the new digest (Part C). The pull secret from Part E is reused, so don't
+   recreate it.
+3. Optionally dry-run with the new digest (Part F).
+4. Run the same `deploy.sh` command (Part G) with the new `--image-digest`.
+5. Verify (Part H). Expect the rollout to take 20–25 minutes.
 
-`--reuse-values` preserves everything else (ePO settings, pull secret, cluster name).
+`deploy.sh` upgrades the existing `edrf-xclient` release in place and creates a new revision.
 
 ---
 
@@ -793,10 +863,11 @@ helm upgrade edrf-xclient ./edrf-xclient -n edrf-tests --reuse-values --set imag
 ```
 helm history edrf-xclient -n edrf-tests
 ```
-Identify the last good revision, then:
+Find the last good revision, then:
 ```
 helm rollback edrf-xclient <revision-number> -n edrf-tests
 ```
+Then verify as in Part H.
 
 ---
 
@@ -806,16 +877,157 @@ helm rollback edrf-xclient <revision-number> -n edrf-tests
 helm uninstall edrf-xclient -n edrf-tests
 ```
 
-This removes the DaemonSet, ServiceAccount, RoleBinding, ConfigMap, and Secret that Helm
-created. It does **not** remove resources created manually outside Helm:
+This removes everything the chart created: the DaemonSet, ServiceAccount, custom SCC,
+ClusterRole, RoleBinding, ConfigMap, and Secret. It does **not** remove the namespace, the pull
+secret you created in Part E, or agent data on the nodes:
 
 ```
-# The namespace itself
-oc delete namespace edrf-tests
-
-# The Artifactory pull secret from Part E
 oc delete secret artifactory-pull-secret -n edrf-tests
-
-# The ePO secret from Part F, if created
-oc delete secret epo-existing-secret -n edrf-tests
+oc delete namespace edrf-tests
 ```
+
+Agent data persists on each node under `/mnt/XClientLogs/`. Remove it only if you want a
+completely clean node (via `oc debug node/<node-name>`, then `chroot /host`). Don't do this
+if you might reinstall and want the existing agent identity kept.
+
+---
+
+## Quick reference — useful read-only commands
+
+```
+oc whoami                                   # who you're logged in as
+oc get nodes                                # cluster nodes and status
+oc get projects                             # projects you can see
+oc get ns edrf-tests                        # does the namespace exist
+oc get pods -n edrf-tests -o wide           # pods, nodes, restarts
+oc get pods -n edrf-tests -o wide -w        # watch live (Ctrl+C to stop)
+oc describe pod -n edrf-tests <pod-name>    # events and last state
+oc logs -n edrf-tests <pod-name>            # agent logs
+oc logs -n edrf-tests <pod-name> --previous # logs from before the last restart
+oc rollout status ds/edrf-xclient-container-security -n edrf-tests
+helm list -n edrf-tests                     # release status and revision
+helm history edrf-xclient -n edrf-tests     # revision history
+helm get values edrf-xclient -n edrf-tests --all   # values in use (includes ePO password)
+helm status edrf-xclient -n edrf-tests      # release status summary
+```
+
+---
+
+## Appendix A — Chart values reference
+
+`deploy.sh` sets these for you from its flags. They're listed here for anyone running Helm
+directly (Appendix B) or reviewing `values.yaml`.
+
+| Field | Required | `deploy.sh` flag | Description |
+|---|---|---|---|
+| `epo.ip` | Yes | `--epo-ip` | IP address or hostname of the ePO server |
+| `epo.user` | Yes | `--epo-user` | ePO admin username |
+| `epo.password` | Yes* | `--epo-password` | ePO admin password. *Not required if `epo.existingSecret` is set. |
+| `epo.existingSecret` | No | none | Name of an existing secret holding the ePO password (key `epo-passwd`), used in place of `epo.password` |
+| `image.repository` | Yes | `--image-repo` | Full image registry path |
+| `image.digest` | Yes | `--image-digest` | SHA256 digest of the image |
+| `imagePullSecret` | No | `--image-pull-secret` | Name of the pull secret. Required in registry mode. Leave empty (`""`) in airgap mode: the DaemonSet then omits `imagePullSecrets`, and OpenShift trusts images in its own internal registry. |
+| `deploymentDetails.clusterName` | Yes | `--cluster-name` | Name identifying this cluster in ePO and telemetry |
+| `deploymentDetails.deploymentMode` | Yes | none (defaults to `Trellix Managed`) | How the deployment is managed |
+
+Required fields use Helm's `required` function, so an install or upgrade fails immediately if
+any of them is empty.
+
+---
+
+## Appendix B — Installing with Helm directly (without `deploy.sh`)
+
+Use this only if you can't run `deploy.sh` (for example, no bash available) and you're in
+registry mode. Run it from the bundle folder after Parts A–F, as a single line:
+
+```
+helm upgrade --install edrf-xclient ./edrf-xclient -n edrf-tests --create-namespace --set epo.ip="<epo_ip>" --set epo.user="<epo_user>" --set epo.password="<epo_password>" --set deploymentDetails.clusterName="<cluster_name>" --set image.repository="<image_repo>" --set image.digest="sha256:<digest>" --set imagePullSecret="artifactory-pull-secret"
+```
+
+Passing the ePO password with `--set` at install time, instead of saving it in
+`values.yaml`, keeps it out of files that might end up in git. Verify as in Part H.
+
+---
+
+## Appendix C — Container image and runtime internals
+
+Background for troubleshooting with the dev team. You don't need this to deploy.
+
+**Image:**
+- **Base image:** RapidFort curated, FIPS-enabled UBI 10 minimal
+  (`artifactory.trellix.com/rapidfort/rfcurated/ubi:ubi10-minimal-fips-rfcurated`), a hardened,
+  low-CVE base.
+- **Contents:** `tini`, runtime dependencies, the McAfee Agent (MA) and XClient RPMs, DXL (Data
+  Exchange Layer, installed from the TA package bundle), and `entrypoint.sh`, the in-container
+  supervisor.
+- **Built by:** the Orbit pipeline `orbit/ContainerSecurity_ImageBuild.groovy` (build context
+  `rhel10/`). The customer bundle is produced by a separate, manually triggered pipeline,
+  `orbit/ContainerSecurity_BundlePackage.groovy`.
+
+**Run model.** `tini` is the container's init process and supervises `entrypoint.sh`, which:
+1. provisions the McAfee Agent (MA/TA) against ePO,
+2. starts MA and XClient and waits for their daemons to come up,
+3. health-checks both in a loop, and exits (causing a pod restart) if either one dies, and
+4. on `SIGTERM`, stops XClient and then MA gracefully before the container exits.
+
+Step 3 is why a crashing agent shows up as a climbing `RESTARTS` count rather than a pod that
+stays down (Part H5).
+
+**DaemonSet design:**
+- **Linux nodes only:** `nodeSelector: kubernetes.io/os: linux`. The workload needs eBPF, the
+  CRI-O socket, and host `/sys` and `/lib/modules`, so it can't run on Windows nodes.
+- **Security context:** runs as `runAsUser: 0` but **not privileged** (`privileged: false`).
+  All Linux capabilities are dropped, then only the ones the eBPF sensor needs are added back
+  (`SYS_ADMIN`, `BPF`, `PERFMON`, `SYS_RESOURCE`, `NET_ADMIN`, and others listed in
+  `values.yaml`). The same list feeds the chart's custom SCC, so the two always match.
+- **`hostNetwork: true`:** the pod shares the node's network stack. That's why ePO
+  reachability has to be tested from the node (`oc debug node/<node-name>`).
+- **`hostPID: true`:** the pod shares the host's process namespace, giving XClient host-level
+  process visibility. Because of this, `tini` isn't PID 1, so it runs in subreaper mode (`-s`)
+  to clean up orphaned processes. **Caution:** `entrypoint.sh` matches processes by name
+  (`masvc|macmnsvc|macompatsvc` and `xclient`), so a host process with a matching command line
+  is also visible to it.
+- **`terminationGracePeriodSeconds: 480`:** gives `entrypoint.sh` time to stop XClient
+  gracefully (up to about 450 seconds, matching the host systemd unit's `TimeoutStopSec=450`).
+  Without it Kubernetes would kill the pod after 30 seconds. This is why pods stay in
+  `Terminating` for several minutes.
+- **Identity environment variables:** `CLUSTER_NAME` and `DEPLOYMENT_MODE` (from
+  `deploymentDetails`), `POD_NAME`, `NODE_NAME`, `NODE_IP`, and
+  `TRELLIX_KUBERNETES_ENVIRONMENT=1`.
+- **Host OS reporting:** the host's `/etc/os-release` is mounted at `/host-etc-os-release`, so
+  the agent reports the node's OS, not the container's.
+- **CRI-O socket:** mounted with `type: Socket`, so Kubernetes checks that the host path really
+  is a socket.
+- **Persistent data:** XClient data, the decryption key, MA logs, and TA config are stored on
+  each node under `/mnt/XClientLogs/` (`xclient`, `fexgt`, `ma-logs`).
+
+---
+
+## Appendix D — Plain Kubernetes and minikube
+
+This guide targets OpenShift. For other platforms:
+
+**Kubernetes 1.23+ without Helm:** use `02-create-sa-k8s.yml` from the product source, which
+applies the required Pod Security Admission (PSA) labels in place of an SCC.
+
+**Local testing on minikube:** use `edrf-xclient-minikube.yml`, a single flattened manifest
+(namespace, ServiceAccount, ConfigMap, Secret, DaemonSet) from the product source:
+```bash
+minikube start --container-runtime=cri-o   # the DaemonSet mounts the CRI-O socket
+minikube image load <image_name:tag>       # no pull secret is used
+# edit the <epo_ip>/<epo_username>/<epo_password> and <image_name:tag> placeholders first
+# CLUSTER_NAME and DEPLOYMENT_MODE are hardcoded in the manifest; edit them if needed
+kubectl apply -f edrf-xclient-minikube.yml
+```
+
+> **minikube only: mount the BPF filesystem first.** XClient pins its eBPF maps under
+> `/sys/fs/bpf`, which must be a mounted BPF filesystem. Real cluster nodes mount it
+> automatically. A minikube node (for example on WSL) doesn't, and the loader fails with
+> `libbpf: ... is not on BPF FS ... failed to create: Invalid argument(-22)`. Mount it, then
+> restart the pod:
+> ```bash
+> minikube ssh -- "stat -f -c %T /sys/fs/bpf | grep -qi bpf && echo 'already bpffs' || sudo mount -t bpf bpf /sys/fs/bpf"
+> minikube ssh -- "mount | grep /sys/fs/bpf"   # expect: bpf on /sys/fs/bpf type bpf
+> kubectl delete pod -l name=edrf-xclient-container-security
+> ```
+> The mount is lost on `minikube stop` or `delete`, so re-run it after each restart.
