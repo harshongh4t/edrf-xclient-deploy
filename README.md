@@ -120,3 +120,23 @@ You can also ask Claude directly: invoke `/edrf-xclient-deploy` and ask how to d
 answer should start with installing the tools (including Git for Windows on Windows), include
 creating the `epo-coninfo` secret from the ePO SmartInstaller, and use `deploy.sh` without any
 ePO flags.
+
+For build **50.3.6.35 and later**, the latest version also mentions the **`installId`** and
+gives the Windows `deploy.sh` command with a `uuidgen` helper, for example in `cmd.exe`:
+```cmd
+"C:\Program Files\Git\bin\bash.exe" -c "uuidgen() { powershell.exe -NoProfile -Command '[guid]::NewGuid().ToString()' | tr -d '\r'; }; export -f uuidgen; ./deploy.sh --namespace <namespace> --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret"
+```
+If your copy still shows `"C:\Program Files\Git\bin\bash.exe" ./deploy.sh ...` without the
+helper, it predates 50.3.6.35. Update it, because that command fails on these builds with
+`ERROR: cannot generate an install ID`.
+
+## What changed in build 50.3.6.35
+
+- `deploy.sh` generates an `installId` on a fresh install and reuses it on upgrades. It needs
+  `uuidgen` or `/proc/sys/kernel/random/uuid`. Git Bash on Windows has neither, so Windows
+  users run `deploy.sh` with the `uuidgen` helper shown above (PowerShell: the same line with
+  `&` in front). Linux and macOS need nothing extra. See `DEPLOYMENT_GUIDE.md` Part H.
+- The chart's `values.yaml` has a new `installId: ""` field. Leave it empty; `deploy.sh` sets it.
+- A fresh install (including after `helm uninstall`) clears each node's persisted agent data
+  under `/mnt/XClientLogs` once. Copy off anything you need first, and don't use
+  `helm uninstall --keep-history`. See `DEPLOYMENT_GUIDE.md` Part L.

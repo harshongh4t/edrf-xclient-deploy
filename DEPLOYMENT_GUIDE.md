@@ -19,6 +19,14 @@ containing the container image, the Helm chart, and two scripts:
 > fails with `ERROR: Unknown option`). ePO connection details now come only from the
 > `epo-coninfo` secret (Part E). If you're upgrading from an older build, see Part L.
 
+> **Changed in build 50.3.6.35:** `deploy.sh` now generates an **`installId`**. On a fresh
+> install it creates a new UUID (`==> Fresh install: installId <uuid>`); on an upgrade it reuses
+> the existing one. To create the UUID it needs `uuidgen` or `/proc/sys/kernel/random/uuid`.
+> **Git Bash on Windows has neither**, so on Windows you run `deploy.sh` with a small `uuidgen`
+> helper in front of it (Part H). Linux and macOS need nothing extra. The chart's `values.yaml`
+> now contains `installId: ""`: leave it empty, because `deploy.sh` fills it in. A fresh install
+> clears old agent data on each node once (Part L).
+
 This guide covers three shells: **PowerShell**, **Command Prompt (`cmd.exe`)**, and
 **Linux/Mac (bash/zsh)**.
 
@@ -162,10 +170,14 @@ To check just the image line, append `| findstr "image:"` (Windows) or `| grep "
 
 ### Step 5 — Install or upgrade with `deploy.sh`
 
-**Windows (`cmd.exe`, one line):**
+**Windows (`cmd.exe`, one line; build 50.3.6.35 and later, includes the `uuidgen` helper):**
 ```cmd
-"C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace <namespace> --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret
+"C:\Program Files\Git\bin\bash.exe" -c "uuidgen() { powershell.exe -NoProfile -Command '[guid]::NewGuid().ToString()' | tr -d '\r'; }; export -f uuidgen; ./deploy.sh --namespace <namespace> --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret"
 ```
+**Windows PowerShell:** the same line with `&` in front (Part H1).
+
+**macOS:** the same as Linux, but run `bash ./deploy.sh ...` (Part H1).
+
 **Linux:**
 ```bash
 chmod +x deploy.sh
@@ -178,12 +190,15 @@ chmod +x deploy.sh
 ```
 
 - **Windows:** don't type `./deploy.sh` on its own in `cmd.exe`, and keep the command on one
-  line.
+  line. The whole `deploy.sh` command goes **inside** the double quotes. Without the
+  `uuidgen` helper, build 50.3.6.35 and later stops with
+  `ERROR: cannot generate an install ID`.
 - **Linux:** `chmod +x` is needed because the extracted script may not be executable
   (otherwise you get `Permission denied`). `bash deploy.sh ...` also works.
 
 **Expected:**
 ```
+==> Fresh install: installId <uuid>        (build 50.3.6.35+, fresh install only)
 ==> Mode: registry (image: <image_repo>@sha256:<digest>)
 ==> Installing Helm chart
 Release "edrf-xclient" has been upgraded. Happy Helming!
@@ -217,7 +232,7 @@ in the ePO console.
 | Change folder | `cd /d C:\edrf-deploy\bundle-<version>` | `cd ~/edrf-deploy/bundle-<version>` |
 | List files | `dir` | `ls -la` |
 | Run `extract-coninfo.sh` | `"C:\Program Files\Git\bin\bash.exe" extract-coninfo.sh ...` | `bash extract-coninfo.sh ...` |
-| Run `deploy.sh` | `"C:\Program Files\Git\bin\bash.exe" ./deploy.sh ...` (one line) | `chmod +x deploy.sh` then `./deploy.sh ...` |
+| Run `deploy.sh` | `"C:\Program Files\Git\bin\bash.exe" -c "uuidgen() {...}; export -f uuidgen; ./deploy.sh ..."` (one line; helper needed from 50.3.6.35) | `chmod +x deploy.sh` then `./deploy.sh ...` |
 | Filter output | `\| findstr "image:"` | `\| grep "image:"` |
 | `oc` / `helm` / `tar` commands | Same | Same |
 
@@ -922,6 +937,9 @@ It must end in `@sha256:` followed by exactly 64 hex characters, with no `<` or 
 
 An `execution error ... is required` means a value is missing or misspelled. Fix it and re-run.
 
+**Build 50.3.6.35 and later:** this dry-run leaves `installId` empty, which is fine for a
+preview. For the real install, use `deploy.sh` (Part H), which sets `installId` for you.
+
 ---
 
 ## Part H (jumpbox) — Run `deploy.sh`
@@ -942,22 +960,53 @@ only these flags:
 Any other flag (including the old `--epo-ip`, `--epo-user`, `--epo-password`) stops the
 script with `ERROR: Unknown option`.
 
+**Build 50.3.6.35 and later: the `installId` and the Windows `uuidgen` helper.** `deploy.sh`
+creates an `installId` (a UUID) on a fresh install and reuses it on upgrades. It gets the UUID
+from `uuidgen` or `/proc/sys/kernel/random/uuid`. Linux has `/proc/sys/kernel/random/uuid`
+and macOS has `uuidgen`, so they need nothing extra. **Git Bash on Windows has neither**, so the
+Windows commands below first define a small `uuidgen` function that asks PowerShell for a GUID:
+
+- `uuidgen() { powershell.exe -NoProfile -Command '[guid]::NewGuid().ToString()' | tr -d '\r'; }`
+  defines the missing command. `tr -d '\r'` removes the Windows line ending, so the ID is a
+  clean UUID.
+- `export -f uuidgen` makes the function visible inside `deploy.sh`.
+- `./deploy.sh ...` then runs in the same bash session.
+
+Without the helper, `deploy.sh` stops with
+`ERROR: cannot generate an install ID (need uuidgen or /proc/sys/kernel/random/uuid)` before
+installing anything.
+
 ### H1. Registry mode
 
-Run from the bundle folder. Replace every `<...>` placeholder. **Pick the block for your
-shell.**
+Run from the bundle folder, in the same window where you ran `oc login`. Replace every `<...>`
+placeholder. **Pick the block for your shell.** The `cmd.exe` form was validated on build
+50.3.6.35.
 
-**cmd.exe** (one line; launches Git Bash from this window so it inherits your login):
+**cmd.exe** (one line; the whole `deploy.sh` command goes inside the double quotes):
 ```cmd
-"C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace edrf-tests --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret
+"C:\Program Files\Git\bin\bash.exe" -c "uuidgen() { powershell.exe -NoProfile -Command '[guid]::NewGuid().ToString()' | tr -d '\r'; }; export -f uuidgen; ./deploy.sh --namespace edrf-tests --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret"
 ```
 
 **PowerShell** (one line; note the leading `&`):
 ```powershell
-& "C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace edrf-tests --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret
+& "C:\Program Files\Git\bin\bash.exe" -c "uuidgen() { powershell.exe -NoProfile -Command '[guid]::NewGuid().ToString()' | tr -d '\r'; }; export -f uuidgen; ./deploy.sh --namespace edrf-tests --cluster-name <cluster_name> --image-repo <image_repo> --image-digest sha256:<digest> --image-pull-secret artifactory-pull-secret"
 ```
 
-**Linux/Mac, or inside a Git Bash window:**
+**Git Bash window on Windows** (if you opened Git Bash itself; first `cd` to the bundle
+folder, for example `cd /c/edrf-deploy/bundle-<version>`, and run `oc whoami` to confirm the
+login is visible):
+```bash
+uuidgen() { powershell.exe -NoProfile -Command '[guid]::NewGuid().ToString()' | tr -d '\r'; }
+export -f uuidgen
+./deploy.sh \
+  --namespace edrf-tests \
+  --cluster-name <cluster_name> \
+  --image-repo <image_repo> \
+  --image-digest sha256:<digest> \
+  --image-pull-secret artifactory-pull-secret
+```
+
+**Linux terminal** (no helper needed):
 ```bash
 chmod +x deploy.sh
 ./deploy.sh \
@@ -967,6 +1016,26 @@ chmod +x deploy.sh
   --image-digest sha256:<digest> \
   --image-pull-secret artifactory-pull-secret
 ```
+If a minimal Linux host still reports `cannot generate an install ID`, install `uuidgen`
+(package `util-linux` or `uuid-runtime`).
+
+**macOS Terminal** (`uuidgen` is built in; run with `bash`, because the macOS default shell is
+zsh):
+```bash
+chmod +x deploy.sh
+bash ./deploy.sh \
+  --namespace edrf-tests \
+  --cluster-name <cluster_name> \
+  --image-repo <image_repo> \
+  --image-digest sha256:<digest> \
+  --image-pull-secret artifactory-pull-secret
+```
+
+**Builds 50.99.0.150 up to (not including) 50.3.6.35** have no `installId`. On Windows you
+can drop the helper:
+`"C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace ...` (PowerShell: with `&` in
+front). The helper form also works on these builds, so if you're not sure of the build, use
+the helper form.
 
 **Shell rules that cause most first-time failures:**
 - **Never type `./deploy.sh` directly in `cmd.exe` or PowerShell.** Always go through Git
@@ -976,6 +1045,7 @@ chmod +x deploy.sh
 
 **Expected output:**
 ```
+==> Fresh install: installId <uuid>        (build 50.3.6.35+, fresh install only)
 ==> Mode: registry (image: <image_repo>@sha256:<digest>)
 ==> Installing Helm chart
 Release "edrf-xclient" has been upgraded. Happy Helming!
@@ -991,6 +1061,15 @@ DESCRIPTION: Upgrade complete
 On a first install, `Release "edrf-xclient" does not exist. Installing it now.` and
 `REVISION: 1` appear instead. Both are success. (`--mode registry` is the default, and
 `image.tar` isn't used in this mode.)
+
+A long `Warning: would violate PodSecurity "restricted:latest": ...` line also appears. It's
+normal for this privileged DaemonSet, not an error. On build 50.3.6.35 and later, confirm the ID
+was set:
+```
+helm get values edrf-xclient -n edrf-tests
+```
+**Expected:** an `installId:` line with a UUID, next to the image, pull secret, and cluster
+name values.
 
 ### H2. Airgap mode
 
@@ -1082,15 +1161,16 @@ oc get imagestream trellix-edrf -n edrf-tests
 
 Pass the **internal service** address, not the route:
 
-**cmd.exe:**
+**cmd.exe** (with the `uuidgen` helper for build 50.3.6.35 and later; see Part H):
 ```cmd
-"C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace edrf-tests --cluster-name <cluster_name> --mode airgap --image-repo image-registry.openshift-image-registry.svc:5000/edrf-tests/trellix-edrf --image-digest sha256:<digest>
+"C:\Program Files\Git\bin\bash.exe" -c "uuidgen() { powershell.exe -NoProfile -Command '[guid]::NewGuid().ToString()' | tr -d '\r'; }; export -f uuidgen; ./deploy.sh --namespace edrf-tests --cluster-name <cluster_name> --mode airgap --image-repo image-registry.openshift-image-registry.svc:5000/edrf-tests/trellix-edrf --image-digest sha256:<digest>"
 ```
 **PowerShell:**
 ```powershell
-& "C:\Program Files\Git\bin\bash.exe" ./deploy.sh --namespace edrf-tests --cluster-name <cluster_name> --mode airgap --image-repo image-registry.openshift-image-registry.svc:5000/edrf-tests/trellix-edrf --image-digest sha256:<digest>
+& "C:\Program Files\Git\bin\bash.exe" -c "uuidgen() { powershell.exe -NoProfile -Command '[guid]::NewGuid().ToString()' | tr -d '\r'; }; export -f uuidgen; ./deploy.sh --namespace edrf-tests --cluster-name <cluster_name> --mode airgap --image-repo image-registry.openshift-image-registry.svc:5000/edrf-tests/trellix-edrf --image-digest sha256:<digest>"
 ```
-**Linux/Mac or Git Bash:**
+**Linux, or a Git Bash window** (in Git Bash, first define and export `uuidgen` as in H1;
+on macOS use `bash ./deploy.sh`):
 ```bash
 ./deploy.sh \
   --namespace edrf-tests \
@@ -1246,6 +1326,7 @@ ls -lrth /mnt/XClientLogs/
 
 | Error | Cause | Action |
 |---|---|---|
+| `ERROR: cannot generate an install ID (need uuidgen or /proc/sys/kernel/random/uuid)` | Build 50.3.6.35 or later run through plain Git Bash on Windows, which has neither | Nothing was installed. Rerun with the `uuidgen` helper form from Part H1. The secrets don't need recreating. |
 | `ERROR: Secret 'epo-coninfo' not found in namespace '<ns>'` | Part E not done, done in a different namespace, or the namespace name is misspelled | Do Part E with the same namespace, then rerun |
 | `ERROR: Unknown option: --epo-ip` (or `--epo-user`, `--epo-password`) | Old command from build 144 or earlier | Remove all `--epo-*` flags. ePO details now come from `epo-coninfo` (Part E). |
 | `ERROR: --image-repo is required in registry mode` (or `--image-digest`, `--image-pull-secret`, `--namespace`, `--cluster-name`) | A flag is missing or misspelled | Check against the table in Part H |
@@ -1290,6 +1371,36 @@ An upgrade is the same process as an install:
 6. Verify (Part I). Expect the rollout to take 20–25 minutes.
 
 `deploy.sh` upgrades the existing `edrf-xclient` release in place and creates a new revision.
+
+### The `installId` (build 50.3.6.35 and later)
+
+XClient crash dumps, its decryption key, TA config, and MA logs persist on each node under
+`/mnt/XClientLogs`, and Helm doesn't remove them. The `installId` controls when that data is
+cleared:
+
+- **Upgrade** (`deploy.sh` over an existing release): the same `installId` is reused, so the
+  data and crash history survive the image change.
+- **Fresh install** (first install, or after `helm uninstall`): `deploy.sh` creates a new
+  `installId`. Each pod sees that it differs from the ID stored on its node and **clears that
+  node's persisted data once**.
+- If you need anything from `/mnt/XClientLogs` (for example crash dumps for a bug), **copy it
+  off before you uninstall and reinstall**: `oc debug node/<node-name>`, then `chroot /host`.
+- Don't use `helm uninstall --keep-history`. A kept release keeps its `installId`, so the
+  reinstall reuses it and doesn't clear the data.
+- If you install with plain Helm instead of `deploy.sh` (Appendix B), set `installId`
+  yourself. Left empty, it never clears data.
+
+### Uninstall and reinstall with a new build (validated on 50.3.6.35, Windows jumpbox)
+
+1. `helm uninstall edrf-xclient -n edrf-tests`, then run `oc get pods -n edrf-tests` until no
+   agent pods are left. The namespace, `epo-coninfo`, and the pull secret stay.
+2. Extract the new bundle (Part B5) and copy the SmartInstaller into the folder.
+3. Recreate `epo-coninfo` from the SmartInstaller (Part E). `oc apply` reports
+   `secret/epo-coninfo configured`.
+4. Get the new digest (Part C). Reuse the pull secret.
+5. Run `deploy.sh` (Part H1). The output starts with `==> Fresh install: installId <uuid>`.
+6. Verify (Part I) and check `helm get values edrf-xclient -n edrf-tests` for the
+   `installId`.
 
 ### Upgrading from build 50.99.0.144 or earlier
 
@@ -1341,6 +1452,10 @@ Agent data persists on each node under `/mnt/XClientLogs/`. Remove it only if yo
 completely clean node (via `oc debug node/<node-name>`, then `chroot /host`). Don't do this
 if you might reinstall and want the existing agent identity kept.
 
+From build 50.3.6.35, the next fresh install through `deploy.sh` gets a new `installId` and
+clears that data once on each node (Part L). Copy off anything you need first, and don't use
+`helm uninstall --keep-history`.
+
 ---
 
 ## Quick reference — useful read-only commands
@@ -1381,6 +1496,7 @@ ePO details come only from the `epo-coninfo` secret.
 | `imagePullSecret` | No | `--image-pull-secret` | Name of the pull secret. Required in registry mode for a private registry. Leave empty (`""`) in airgap mode: the DaemonSet then omits `imagePullSecrets`. |
 | `deploymentDetails.clusterName` | Yes | `--cluster-name` | Name identifying this cluster in ePO and telemetry |
 | `deploymentDetails.deploymentMode` | Yes | none (default `Trellix Managed`) | How the deployment is managed |
+| `installId` | No (build 50.3.6.35+) | none; `deploy.sh` generates it on a fresh install and reuses it on upgrade | UUID identifying this installation. A pod whose `installId` differs from the one stored on its node clears that node's persisted data under `/mnt/XClientLogs` once. Empty never clears data. Leave it empty in `values.yaml`. |
 | `serviceAccount.name` | No | none (default `edrf-admin`) | ServiceAccount the pods run as |
 | `securityContext.capabilities` | No | none | Linux capabilities added to the container, and allowed by the custom SCC |
 | `resources` | No | none (default requests 2Gi / 500m, limits 4Gi / 1000m) | Pod CPU and memory |
@@ -1402,6 +1518,11 @@ helm upgrade --install edrf-xclient ./edrf-xclient -n edrf-tests --create-namesp
 
 Unlike `deploy.sh`, Helm doesn't check for the `epo-coninfo` secret. If it's missing, the
 install succeeds but the pods stay in `ContainerCreating`. Verify as in Part I.
+
+**Build 50.3.6.35 and later:** Helm doesn't set `installId` either. On a fresh install, add
+`--set installId="<new-uuid>"` (generate one with `uuidgen` on Linux/macOS, or
+`powershell -Command "[guid]::NewGuid()"` on Windows). On an upgrade, reuse the current value
+from `helm get values edrf-xclient -n edrf-tests`. See Part L for what the ID does.
 
 ---
 
@@ -1632,6 +1753,7 @@ chmod +x deploy.sh
   --image-pull-secret $PULL_SECRET
 
 # Expected:
+#   ==> Fresh install: installId <uuid>   (build 50.3.6.35+, fresh install only)
 #   ==> Mode: registry (image: ...@sha256:...)
 #   ==> Installing Helm chart
 #   STATUS: deployed
