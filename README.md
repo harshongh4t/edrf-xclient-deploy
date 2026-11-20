@@ -7,10 +7,20 @@
 
 ---
 
+## Files
+
+| File | Use it for |
+|---|---|
+| `DEPLOYMENT_GUIDE.md` | Installing, upgrading, rolling back, and uninstalling `edrf-xclient` |
+| `OPENSHIFT_COMMANDS.md` | Testing and troubleshooting a deployed agent: the agent CLI in the pod, node shells, firewall checks, test pods pinned to a node, ping/TCP/UDP checks from node and pod, adding a worker node, process/file exclusion tests, and evidence collection |
+| `.claude/skills/edrf-xclient-deploy/SKILL.md` | Claude Code skill built from both documents |
+
+---
+
 ## Get guided deployment help from Claude Code
 
 This repository includes a Claude Code skill (`.claude/skills/edrf-xclient-deploy/`) built
-from `DEPLOYMENT_GUIDE.md`. It lets Claude walk you through installing or troubleshooting
+from `DEPLOYMENT_GUIDE.md` and `OPENSHIFT_COMMANDS.md`. It lets Claude walk you through installing or troubleshooting
 `edrf-xclient` interactively — enforcing the correct step order and recognizing the specific
 failure modes documented in the guide — instead of you reading the guide end to end.
 
@@ -40,12 +50,14 @@ Claude Code.
    ```
    mkdir "%USERPROFILE%\.claude\skills\edrf-xclient-deploy"
    copy DEPLOYMENT_GUIDE.md "%USERPROFILE%\.claude\skills\edrf-xclient-deploy\"
+   copy OPENSHIFT_COMMANDS.md "%USERPROFILE%\.claude\skills\edrf-xclient-deploy\"
    copy .claude\skills\edrf-xclient-deploy\SKILL.md "%USERPROFILE%\.claude\skills\edrf-xclient-deploy\"
    ```
    **Linux/Mac:**
    ```bash
    mkdir -p ~/.claude/skills/edrf-xclient-deploy
    cp DEPLOYMENT_GUIDE.md ~/.claude/skills/edrf-xclient-deploy/
+   cp OPENSHIFT_COMMANDS.md ~/.claude/skills/edrf-xclient-deploy/
    cp .claude/skills/edrf-xclient-deploy/SKILL.md ~/.claude/skills/edrf-xclient-deploy/
    ```
 2. Start a new Claude Code session (in any project). The skill is now available everywhere,
@@ -95,16 +107,19 @@ one-time reset in step 1 below instead.
    **Windows (cmd.exe):**
    ```
    copy /Y DEPLOYMENT_GUIDE.md "%USERPROFILE%\.claude\skills\edrf-xclient-deploy\"
+   copy /Y OPENSHIFT_COMMANDS.md "%USERPROFILE%\.claude\skills\edrf-xclient-deploy\"
    copy /Y .claude\skills\edrf-xclient-deploy\SKILL.md "%USERPROFILE%\.claude\skills\edrf-xclient-deploy\"
    ```
    **Windows (PowerShell):**
    ```powershell
    Copy-Item DEPLOYMENT_GUIDE.md "$env:USERPROFILE\.claude\skills\edrf-xclient-deploy\" -Force
+   Copy-Item OPENSHIFT_COMMANDS.md "$env:USERPROFILE\.claude\skills\edrf-xclient-deploy\" -Force
    Copy-Item .claude\skills\edrf-xclient-deploy\SKILL.md "$env:USERPROFILE\.claude\skills\edrf-xclient-deploy\" -Force
    ```
    **Linux/Mac:**
    ```bash
    cp DEPLOYMENT_GUIDE.md ~/.claude/skills/edrf-xclient-deploy/
+   cp OPENSHIFT_COMMANDS.md ~/.claude/skills/edrf-xclient-deploy/
    cp .claude/skills/edrf-xclient-deploy/SKILL.md ~/.claude/skills/edrf-xclient-deploy/
    ```
 3. Start a **new** Claude Code session.
@@ -129,6 +144,9 @@ gives the Windows `deploy.sh` command with a `uuidgen` helper, for example in `c
 If your copy still shows `"C:\Program Files\Git\bin\bash.exe" ./deploy.sh ...` without the
 helper, it predates 50.3.6.35. Update it, because that command fails on these builds with
 `ERROR: cannot generate an install ID`.
+
+To check for the testing commands: `SKILL.md` should have a **Step 5a** that points to
+`OPENSHIFT_COMMANDS.md`. If it doesn't, update as above.
 
 ## What changed in build 50.3.6.35
 

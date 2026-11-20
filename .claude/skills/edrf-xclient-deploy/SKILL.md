@@ -1,6 +1,6 @@
 ---
 name: edrf-xclient-deploy
-description: Deploy or troubleshoot the Trellix eDRF XClient container-security agent on OpenShift using the edrf-xclient bundle (deploy.sh and extract-coninfo.sh). Use when the user wants to install, upgrade, verify, debug (image pull failures, InvalidImageName, pods restarting, not reporting to ePO), collect logs from, or uninstall the edrf-xclient DaemonSet, or asks about oc/helm/Git Bash setup, oc login or KUBECONFIG, cluster permissions, the ePO SmartInstaller and epo-coninfo secret, the Artifactory pull secret, image digest, registry vs airgap mode, or useful oc commands for this deployment.
+description: Deploy or troubleshoot the Trellix eDRF XClient container-security agent on OpenShift using the edrf-xclient bundle (deploy.sh and extract-coninfo.sh). Use when the user wants to install, upgrade, verify, debug (image pull failures, InvalidImageName, pods restarting, not reporting to ePO), collect logs from, or uninstall the edrf-xclient DaemonSet, or asks about oc/helm/Git Bash setup, oc login or KUBECONFIG, cluster permissions, the ePO SmartInstaller and epo-coninfo secret, the Artifactory pull secret, image digest, registry vs airgap mode, or useful oc commands for this deployment. Also use it for testing a deployed agent: agent CLI in the pod (cmdagent, xclient -x config dump, xclient -G log), oc debug node shells, nft/iptables checks, custom test pods pinned to a node, ping/TCP/UDP reachability from node and pod, adding a worker node via MachineSet, and process/file exclusion tests.
 ---
 
 # eDRF XClient — OpenShift Deployment
@@ -35,6 +35,11 @@ its node clears that node's persisted agent data under `/mnt/XClientLogs` once (
 https://github.com/harshongh4t/edrf-xclient-deploy/blob/main/DEPLOYMENT_GUIDE.md) is the full
 reference, with command blocks for PowerShell, `cmd.exe`, and Linux/Mac. This file holds the
 operating logic: the required order, the exact commands, and how to diagnose failures.
+
+`OPENSHIFT_COMMANDS.md` (same location, or
+https://github.com/harshongh4t/edrf-xclient-deploy/blob/main/OPENSHIFT_COMMANDS.md) holds the
+commands for **testing and troubleshooting a deployed agent** (Step 5a). Read it when the user
+asks about anything after the install.
 
 ## Rules for every response
 
@@ -617,6 +622,56 @@ oc debug node/<node-name>
 chroot /host
 ls -lrth /mnt/XClientLogs/
 ```
+
+## Step 5a — Testing a deployed agent (OPENSHIFT_COMMANDS.md)
+
+When the user is past the install and wants to test or inspect the agent, take the commands
+from `OPENSHIFT_COMMANDS.md`. Its sections are:
+
+1. Nodes and agent pods
+2. Agent CLI inside the pod
+3. Node shell
+4. Custom test pods
+5. Network checks
+6. Add or remove a worker node
+7. Process and file exclusion tests
+8. Evidence collection
+9. Windows jumpbox notes
+
+Fill in the user's real values when they gave them in the conversation. Never write those
+values into repo files. Key facts to apply:
+
+- **Agent CLI paths in the pod:** `/opt/McAfee/agent/bin/cmdagent` and
+  `/opt/Trellix/XClient/bin/xclient`. After a policy change in ePO, run `cmdagent -c` then
+  `cmdagent -e`.
+- **Config check:** `xclient -x /tmp/cfg.txt`, then `grep` the key. `config_manager` lines in
+  `xclient -G -T <seconds>` show each applied value.
+- **Event collection:** the XClient log does **not** list individual process, file, or network
+  events, even at `mxa/log/level:"DEBUG"`. Never use it to judge whether an event (or an
+  exclusion) worked. Use HX (triage timeline or IOC) or the local Eventor database instead.
+- **Node shell:** use `oc debug node/<node-name> -- chroot /host <command>`. `/usr` is
+  read-only on RHCOS, so put test files in `/var/tmp`. `/tmp`, `.txt`, and `.log` are in the
+  agent's file-hashing ignore lists, so avoid them in tests.
+- **Test pods:** use the cluster's `openshift/tools` image
+  (`oc get istag -n openshift tools:latest -o jsonpath="{.image.dockerImageReference}"`). Set
+  `nodeName` in the pod spec to pin it to a node, and use a restricted `securityContext`.
+  Unprivileged ping works in it.
+- **Separate instances:** test reachability from the node and from a pod on the node
+  separately, and compare against a control node that isn't contained. While a node is
+  contained, `oc debug`/`oc exec` to it can fail. That is not a test result.
+- **Exclusion tests:**
+  - For the unique process, use a renamed copy of `cp` started directly by `chroot`, not a
+    copy of `bash`: shells and their child processes can be monitored as a group.
+  - Always pair each excluded item with an identical control that isn't excluded. A phase
+    where the controls show no events is invalid.
+- **Adding a worker node:** scale the MachineSet. Before scaling down, annotate the new machine
+  with `machine.openshift.io/delete-machine=true`, or a random worker is deleted. New nodes
+  leave stale ePO/HX entries when removed.
+- **`cmd.exe` quoting:** put the `sh -c` script in double quotes, with single quotes inside.
+- **PowerShell 5.1:** it strips embedded double quotes in native arguments, so `grep`
+  patterns inside `sh -c` must use single quotes.
+- **Running `.ps1` from `cmd.exe`:** use
+  `powershell -NoProfile -ExecutionPolicy Bypass -File .\script.ps1`.
 
 ## Step 6 — When troubleshooting
 
